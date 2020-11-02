@@ -15,7 +15,7 @@
 |0x04 | Write Address |  
 |0x08 | Write Data |  
 |0x0C | Read Address |  
-|0x0F | Read Data |  
+|0x10 | Read Data |  
   
 **Write Control**  
 Bit 0 = Write Enable  
