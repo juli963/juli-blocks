@@ -4,15 +4,17 @@ import Memory.onChip.TrueDualPortBRAM
 
 import chisel3._
 import chisel3.util._
+import chisel3.experimental._
 
 import freechips.rocketchip.regmapper._
-import sifive.blocks.util.{SlaveRegIF, GenericTimerIO, GenericTimer, GenericTimerCfgDescs, DefaultGenericTimerCfgDescs}
+import sifive.blocks.util.{SlaveRegIF}
 
 class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends Module {
   protected val prefix = "ethctrl"
   protected def regBytes = regWidth/8
   val io = IO(new Bundle {
     val RGMII = new Ethernet.Interface.Types.RGMII_Interface()
+    val PHY_nrst = Output(Bool())
     val EthernetClock125 = Input(Clock())
     val EthernetClock250 = Input(Clock())
     val interrupt = Output(Bool())
@@ -44,18 +46,19 @@ class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends
   val mem_RX = Module(new TrueDualPortBRAM(Indizes*NumBuffers, UInt(regWidth.W)))
   val mem_TX = Module(new TrueDualPortBRAM(Indizes*NumBuffers, UInt(regWidth.W)))
   val m_fifo = Module(new Ethernet.Protocol.EthernetFIFO8())
-  val m_rgmii = Module(new Ethernet.Interface.RGMII.RGMII())
+  val m_rgmii = Module(new Ethernet.Interface.RGMII.RGMII(canForceSpeed = true))
   m_rgmii.clock := io.EthernetClock125
 
   // Register
   val PHYForce = RegEnable(io.regs.PHYForce.write.bits, io.regs.PHYForce.write.valid)
   io.regs.PHYForce.read := PHYForce
+  m_rgmii.io.forceSpeed.get := PHYForce
 
 
-  val wrena = RegEnable(io.regs.wrena.write.bits, io.regs.wrena.write.valid)
+  val wrena = RegEnable(io.regs.wrena.write.bits.toBool, io.regs.wrena.write.valid)
     io.regs.wrena.read := wrena
     mem_TX.io.MemIO.wr := wrena
-  val start_TX = RegEnable(io.regs.start_TX.write.bits, io.regs.start_TX.write.valid)
+  val start_TX = RegEnable(io.regs.start_TX.write.bits.toBool, io.regs.start_TX.write.valid)
     val start_TX_ff = RegNext(start_TX)
     io.regs.start_TX.read := start_TX
     val wsync_busy_TX = Wire(Bool())
@@ -70,19 +73,21 @@ class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends
     val wsync_busy_RX = Wire(Bool())
   val wsync_busy_RX_ff = RegNext(wsync_busy_RX) // Probably Synchronize twice
     io.regs.busy_RX.read := RegNext(wsync_busy_RX_ff) // Probably Synchronize twice
-  val ipRX = RegEnable(io.regs.ipRX.write.bits || wip, io.regs.ipRX.write.valid || wip)
+    val wip = Wire(Bool())
+    val wip_ff = RegNext(wip)
+  val ipRX = RegEnable(io.regs.ipRX.write.bits.toBool || (wip && ~wip_ff), io.regs.ipRX.write.valid || (wip && ~wip_ff))
     io.regs.ipRX.read := ipRX
-    interrupt := ipRX
-  val bufferLockRX = RegEnable(io.regs.bufferLockRX.write.bits, io.regs.bufferLockRX.write.valid)
-    io.regs.bufferLockRX.read := wbufferLockRX
+    io.interrupt := ipRX
+  val bufferLockRX = RegEnable(io.regs.bufferLockRX.write.bits.toBool, io.regs.bufferLockRX.write.valid)
+    io.regs.bufferLockRX.read := bufferLockRX
   val bufferStatRX = RegInit(0.U(NumBuffers.W)) 
     io.regs.bufferStatRX.read := bufferStatRX
     when(io.regs.bufferStatRX.write.valid){
       bufferStatRX := io.regs.bufferStatRX.write.bits
     }
-    val wlastBuffer_RX := Wire(UInt(NumBuffers.W))
-    val synclastBuffer_RX := RegNext(wlastBuffer_RX) // Probably Synchronize twice
-    when(~wsync_busy_RX_ff && io.regs.busy_RX.read && ~error_RX){  // Falling Edge and no error
+    val wlastBuffer_RX = Wire(UInt(NumBuffers.W))
+    val synclastBuffer_RX = RegNext(wlastBuffer_RX) // Probably Synchronize twice
+    when(~wsync_busy_RX_ff && io.regs.busy_RX.read.toBool && ~error_RX){  // Falling Edge and no error -> Update Buffer Stats
       bufferStatRX := io.regs.bufferStatRX.write.bits | synclastBuffer_RX
     } 
   val bufferSelectRX = RegEnable(io.regs.bufferSelectRX.write.bits, io.regs.bufferSelectRX.write.valid)
@@ -98,11 +103,11 @@ class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends
     io.regs.rdaddr.read := rdaddr
     mem_RX.io.MemIO.rdAddr := rdaddr
 
-  io.regs.rddata.read := mem.io.MemIO.rdData
+  io.regs.rddata.read := mem_RX.io.MemIO.rdData
 
-  io.PHYEst.read := m_rgmii.io.PHYStat.Link
-  io.PHYLink.read := m_rgmii.io.PHYStat.Speed
-  io.PHYDuplex.read := m_rgmii.io.PHYStat.Duplex
+  io.regs.PHYEst.read := m_rgmii.io.PHYStat.Link
+  io.regs.PHYLink.read := m_rgmii.io.PHYStat.Speed
+  io.regs.PHYDuplex.read := m_rgmii.io.PHYStat.Duplex
 
   mem_RX.io.clockRd := clock
   mem_TX.io.clockWr := clock
@@ -114,42 +119,101 @@ class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends
   // PHY Logic Here
   withClock(io.EthernetClock125){
     io.RGMII <> m_rgmii.io.PHY 
-    io.PHY_nrst := ~reset
+    io.PHY_nrst := ~reset.toBool
     m_rgmii.io.clk_250M := io.EthernetClock250
     m_fifo.io.PHYStat := m_rgmii.io.PHYStat 
     m_rgmii.io.Bus <> m_fifo.io.PHYBus
 
-    protected def TX_FSM_busy: Bool = {
+    def TX_FSM_busy: Bool = {
         val start_Trig = RegNext(RegNext(start_TX && ~start_TX_ff))
-        val ( s_idle :: s_setAddress :: s_getLength :: s_send_Data :: s_finish :: Nil) = Enum(UInt(), 5)
+        val ( s_idle :: s_getLength :: s_send_Data :: s_finish :: Nil) = Enum(4)
         val state = RegInit(s_idle)
-        val byteCounter = RegInit(UInt( log2Ceil(regBytes*Indizes).W ))
+        val byteCounter = RegInit(0.U( log2Ceil(regBytes*Indizes).W ))
+        val shiftCounter = RegInit(0.U( log2Ceil(4).W ))
+        val selectedBuffer = RegNext(RegNext(buffer_TX))
+        val data = mem_TX.io.MemIO.rdData
+        val address = RegInit(0.U(log2Ceil(Indizes).W))
+        mem_TX.io.MemIO.rdAddr := address
+        
+        val frun = RegInit(false.B)
+        val fstrb = RegInit(0.U(1.W))
+        val fdata = RegInit(0.U(8.W))
+        m_fifo.io.EthernetBus.tx.run := frun
+        m_fifo.io.EthernetBus.tx.data := fstrb
+        m_fifo.io.EthernetBus.tx.strb := fdata
+
         switch(state){
           is(s_idle){
+            frun := false.B
+            when(start_Trig){
+              address := (selectedBuffer * Indizes.U)+0.U
+              state := s_getLength
+            }
+          }
+          is(s_getLength){
+            byteCounter := data
+            shiftCounter := 0.U
+            address := address + 1.U
+            when( m_fifo.io.EthernetBus.tx.ready ){
+              state := s_send_Data
+              frun := true.B
+            }
             
+            fdata := 0.U
+            fstrb := 0.U
+          }
+          is(s_send_Data){
+            when( m_fifo.io.EthernetBus.tx.ready ){ // FIFO not Full
+              byteCounter := byteCounter - 1.U
+              when(shiftCounter >= 3.U){
+                shiftCounter := 0.U
+                address := address + 1.U
+              }.otherwise{
+                shiftCounter := shiftCounter + 1.U
+              }
+              when(byteCounter === 0.U){
+                state := s_finish
+              }
+              fdata := (data >> shiftCounter*8.U) & "hFF".U
+              fstrb := 1.U
+            }
+          }
+          is(s_finish){
+            when( m_fifo.io.EthernetBus.tx.ready ){
+              state := s_idle
+            }
+            fdata := 0.U
+            fstrb := 0.U
           }
         }
       state =/= s_idle
     }
     wsync_busy_TX := TX_FSM_busy
 
-    protected def RX_FSM_busy: Bool = {
-        val ( s_idle :: s_receive_first :: s_receive :: s_writeMACs :: s_writeLength :: s_finish :: Nil) = Enum(UInt(), 6)
+    def RX_FSM_busy: Bool = {
+        val ( s_idle :: s_receive_first :: s_receive :: s_writeMACs :: s_writeLength :: s_finish :: Nil) = Enum(6)
         val state = RegInit(s_idle)
-        val byteCounter = RegInit(UInt( log2Ceil(regBytes*Indizes).W ))
-        val shiftCounter = RegInit(UInt( log2Ceil(4).W ))
-        val bufferStates = RegNext(RegNext(bufferStatRX))
-        val selectedBuffer = RegInit(0.U(log2Ceil(NumBuffers.W)))
+        val byteCounter = RegInit(0.U( log2Ceil(regBytes*Indizes).W ))
+        val shiftCounter = RegInit(0.U( log2Ceil(4).W ))
+        val bufferStates = RegInit(0.U(NumBuffers.W))//RegNext(RegNext(bufferStatRX))
+        val bufferStates_ff = RegInit(0.U(NumBuffers.W))
+        bufferStates_ff := bufferStatRX
+        bufferStates := bufferStates_ff
+        val selectedBuffer = RegInit(0.U(log2Ceil(NumBuffers).W))
         val error = RegInit(false.B)
         val lock = RegNext(RegNext(bufferLockRX))
-        val lockedBuffer = RegNext(RegNext(UIntToOH(bufferSelectRX)))
+        val lockedBuffer =  RegInit(0.U(NumBuffers.W))//RegNext(RegNext(UIntToOH(bufferSelectRX)))
+        val lockedBuffer_ff = RegInit(0.U(NumBuffers.W))
+        lockedBuffer_ff := UIntToOH(bufferSelectRX)
+        lockedBuffer := lockedBuffer_ff
         val data = RegInit(0.U(32.W))
         val address = RegInit(0.U(log2Ceil(Indizes).W))
         val wr = RegInit(false.B)
+        val ip = RegInit(false.B)
         mem_RX.io.MemIO.wrAddr := address
         mem_RX.io.MemIO.wrData := data
         mem_RX.io.MemIO.wr := wr
-
+        wip := ip
         wError_RX := error
         wlastBuffer_RX := UIntToOH(selectedBuffer)
 
@@ -157,20 +221,21 @@ class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends
         switch(state){
           is(s_idle){
             wr := false.B
-            when(m_fifo.io.EthernetBus.rx.strb)
+            when(m_fifo.io.EthernetBus.rx.strb > 0.U){
+              ip := false.B
               error := m_fifo.io.EthernetBus.rx.error
               data := m_fifo.io.EthernetBus.rx.data << 16.U | m_fifo.io.EthernetBus.rx.info.etype
               byteCounter := 1.U
               shiftCounter := 3.U
               when(lock){
-                when( bufferStates < (scala.math.pow(2,NumBuffers)-1).U ){
+                when( bufferStates < (scala.math.pow(2,NumBuffers)-1).ceil.toInt.U ){
                   selectedBuffer := PriorityEncoder( ~(bufferStates | lockedBuffer) )
                 }.otherwise{
-                  selectedBuffer := PriorityEncoder( ~(lockedBuffer) )
+                  selectedBuffer := PriorityEncoder( ~lockedBuffer )
                 }
               }.otherwise{
-                when( bufferStates < (scala.math.pow(2,NumBuffers)-1).U ){
-                  selectedBuffer := PriorityEncoder( ~(bufferStates) )
+                when( bufferStates < (scala.math.pow(2,NumBuffers)-1).ceil.toInt.U ){
+                  selectedBuffer := PriorityEncoder( ~bufferStates )
                 }.otherwise{
                   selectedBuffer := 0.U
                 }
@@ -178,7 +243,7 @@ class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends
             }
           }
           is(s_receive_first){
-            when(m_fifo.io.EthernetBus.rx.strb && ~m_fifo.io.EthernetBus.rx.empty){
+            when((m_fifo.io.EthernetBus.rx.strb > 0.U) && ~m_fifo.io.EthernetBus.rx.empty){
               error := m_fifo.io.EthernetBus.rx.error
               byteCounter := byteCounter + 1.U
               shiftCounter := 0.U
@@ -189,7 +254,7 @@ class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends
             }
           }
           is(s_receive){
-            when(m_fifo.io.EthernetBus.rx.strb && ~m_fifo.io.EthernetBus.rx.empty){ // strb and last were always together true!!
+            when( (m_fifo.io.EthernetBus.rx.strb > 0.U) && ~m_fifo.io.EthernetBus.rx.empty){ // strb and last were always together true!!
               error := m_fifo.io.EthernetBus.rx.error
               when(shiftCounter < 3.U){
                 shiftCounter := shiftCounter + 1.U
@@ -238,6 +303,9 @@ class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends
             state := s_finish
           }
           is(s_finish){
+            when(~error){
+              ip := true.B
+            }
             address := (selectedBuffer * Indizes.U)+1.U
             data := byteCounter
             state := s_idle
@@ -253,22 +321,22 @@ class ETHCtrl(regWidth: Int = 32, Indizes: Int = 5, NumBuffers: Int = 3) extends
 
   // Register Descriptions
   protected val PHY_desc : Seq[RegFieldDesc] = Seq(
-    RegFieldDesc(s"${prefix}_PHYEst", "Link established", access=RegFieldAccessType.R, volatile=true)
-    RegFieldDesc(s"${prefix}_PHYDupl", "Half or Full Duplex", access=RegFieldAccessType.R, volatile=true)
-    RegFieldDesc(s"${prefix}_PHYForce", "Force Link Speed")
+    RegFieldDesc(s"${prefix}_PHYEst", "Link established", access=RegFieldAccessType.R, volatile=true),
+    RegFieldDesc(s"${prefix}_PHYDupl", "Half or Full Duplex", access=RegFieldAccessType.R, volatile=true),
+    RegFieldDesc(s"${prefix}_PHYForce", "Force Link Speed"),
     RegFieldDesc(s"${prefix}_PHYSpeed", "Linkspeed", access=RegFieldAccessType.R, volatile=true)
   )
   protected val TX_desc : Seq[RegFieldDesc] = Seq(
-    RegFieldDesc(s"${prefix}_TXWriteEn", "Enable Writeaccess to Buffer")
-    RegFieldDesc(s"${prefix}_TXStart", "Start Transmission of selected Buffer")
-    RegFieldDesc(s"${prefix}_TXBusy", "Transmission in Progress", access=RegFieldAccessType.R, volatile=true)
+    RegFieldDesc(s"${prefix}_TXWriteEn", "Enable Writeaccess to Buffer"),
+    RegFieldDesc(s"${prefix}_TXStart", "Start Transmission of selected Buffer"),
+    RegFieldDesc(s"${prefix}_TXBusy", "Transmission in Progress", access=RegFieldAccessType.R, volatile=true),
     RegFieldDesc(s"${prefix}_TXBuffer", "Buffer for Sending")
   )
   protected val RX_desc : Seq[RegFieldDesc] = Seq(
-    RegFieldDesc(s"${prefix}_RXBusy", "Receiver Busy", access=RegFieldAccessType.R, volatile=true)
-    RegFieldDesc(s"${prefix}_RXIp", "Interrupt Bit", volatile=true)
-    RegFieldDesc(s"${prefix}_RXLock", "Enable Lock")
-    RegFieldDesc(s"${prefix}_RXBuffer", "Buffer for Lock")
+    RegFieldDesc(s"${prefix}_RXBusy", "Receiver Busy", access=RegFieldAccessType.R, volatile=true),
+    RegFieldDesc(s"${prefix}_RXIp", "Interrupt Bit", volatile=true),
+    RegFieldDesc(s"${prefix}_RXLock", "Enable Lock"),
+    RegFieldDesc(s"${prefix}_RXBuffer", "Buffer for Lock"),
     RegFieldDesc(s"${prefix}_RXStat", "Buffer Status", volatile=true)
   )
   protected def txaddr_desc:    RegFieldDesc = RegFieldDesc(s"${prefix}_wraddr", "Write Address")
