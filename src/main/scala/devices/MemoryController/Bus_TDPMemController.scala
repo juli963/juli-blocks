@@ -12,55 +12,121 @@ import freechips.rocketchip.interrupts._
 import freechips.rocketchip.util._
 import chisel3.experimental.withClock
 
-case class TDPMemParams(address: BigInt = 0x2000, regBytes: Int = 4, useAXI4: Boolean = false, sizeBytes: Int = 32) 
+import freechips.rocketchip.diplomacy._
+import freechips.rocketchip.interrupts._
+import freechips.rocketchip.regmapper._
+import freechips.rocketchip.tilelink._
+
+import sifive.blocks.util.{SlaveRegIF, GenericTimerIO, GenericTimer, GenericTimerCfgDescs, DefaultGenericTimerCfgDescs}
+
+case class TDPMemParams(address: BigInt = 0x2000, regBytes: Int = 4, useAXI4: Boolean = false, sizeBytes: Int = 32, fAddress : BigInt = 0x3000, fSize : Int = 32) 
 {
   def Offset:Int = 0
 }
 
-case object TDPMemKey extends Field[Option[TDPMemParams]](None)
-
 case object TDPMemListKey extends Field[Option[Seq[TDPMemParams]]](None)
 
-
-trait TDPMemBundle
+class TDPMemBundle(c: TDPMemParams) extends Bundle
 {
-  val params: TDPMemParams
-  val c = params
-
+;
+override def cloneType = (new TDPMemBundle(c)).asInstanceOf[this.type]
 }
 
-trait TDPMemModule extends HasRegMap
+class TDPMemModule(c: TDPMemParams, outer: TLTDPMem) extends LazyModuleImp(outer)
 {
-  val params: TDPMemParams
-  val io: TDPMemBundle
-  val interrupts: Vec[Bool]
-  val c = params
+  val params = c
+
   val mem = Module( new TDPMem(regWidth = c.regBytes*8, Indizes = (c.sizeBytes.toFloat/c.regBytes.toFloat).ceil.toInt ))
-  regmap(
-      (TDPMem.RegMap(mem, c.regBytes) :_*)
-    ) 
+  //outer.interrupts(0)
+//outer.port
+  val (f, n) = outer.fnode.in(0)
+  val a_channel = RegEnable(f.a.bits, f.a.fire())
+
+  //var a = None
+  //a = f.d.bits
+
+  f.b.valid := Bool(false)
+  f.c.ready := Bool(true)
+  f.e.ready := Bool(true)
+  
+
+  val counter = RegInit(0.U(8.W))
+  when(f.a.fire()){
+    counter := counter + 1.U
+  }
+  f.a.ready := f.a.valid
+  /*when(f.a.valid){
+    f.a.ready := true.B
+  }.otherwise{
+    f.a.read := false.B
+  }*/
+  val valid = RegInit(false.B)
+  f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel, counter)
+  f.d.valid := valid
+  when(f.a.ready){
+    valid := true.B
+  }.elsewhen(f.d.ready){
+    valid := false.B
+  }
+  
+  
+  //    println("Roll Number = " + n.bundle.dataBits);
+
+  //var ct = None
+  //private val (f, n) = fnode.in(0)
+  //ct = n.bundle.dataBits
+  println("TDP Mem Bus Parameters: ")
+  println("Data Bits = " + n.bundle.dataBits);
+  println("Address Bits = " + n.bundle.addressBits);
+  println("Source Bits = " + n.bundle.sourceBits);
+  println("Sink Bits = " + n.bundle.sinkBits);
+  println("Size Bits = " + n.bundle.sizeBits);
+
+  //val s = IO(new SlaveRegIF(1))
+  //val sreg = RegEnable(s.write.bits,s.write.valid)
+  //s.read := sreg
+  //protected def wr_desc:        RegFieldDesc = RegFieldDesc(s"write", "Write Enable")
+
+  //val regmap_f =  Seq( c.regBytes*0 -> Seq(s.toRegField(Some(wr_desc))) )  //TDPMem.RegMap(mem, c.regBytes) 
+
 }
 
-// Create a concrete TL2 version of the abstract Example slave
-class TLTDPMem( params: TDPMemParams, beatBytes:Int)(implicit p: Parameters)
-  extends TLRegisterRouter(
-  params.address,
-  "TDPMem", 
-  Seq("juli,TDPMem"), 
-  beatBytes = beatBytes,
-  interrupts = 0,
-  concurrency = 1)(
-  new TLRegBundle(params, _)    with TDPMemBundle)(
-  new TLRegModule(params, _, _) with TDPMemModule) 
+abstract class TLTDPMemBase( c: TDPMemParams, beatBytes:Int)(implicit p: Parameters) extends IORegisterRouter(
+      RegisterRouterParams(
+        name = "TDPMem",
+        compat = Seq("juli,TDPMem"),
+        base = c.address,
+        size = c.sizeBytes,
+        beatBytes = beatBytes),
+      new TDPMemBundle(c))
+    with HasInterruptSources {
+
+  require(isPow2(c.fSize))
+  require(isPow2(c.sizeBytes))
+
+  val fnode = TLManagerNode(Seq(TLManagerPortParameters(
+    managers = Seq(TLManagerParameters(
+      address     = Seq(AddressSet(c.fAddress, c.fSize-1)),
+      resources   = device.reg("mem"),
+      regionType  = RegionType.UNCACHED,
+      executable  = false,  // No Executable Code
+      supportsGet = TransferSizes(1, 1),  // Transfer Size in Bytes(min, max) 
+      fifoId      = Some(0))),
+    beatBytes = 1)))
+
+  override def nInterrupts = 0
+}
+
+class TLTDPMem(c: TDPMemParams, w: Int)(implicit p: Parameters)
+    extends TLTDPMemBase(c,w)(p)
+    with HasTLControlRegMap {
+  lazy val module = new TDPMemModule(c, this) {
+
+    //regmap(regmap_f :_*)
+  }
+}
 
 class AXI4TDPMem(params: TDPMemParams, beatBytes: Int)(implicit p: Parameters)
-  extends AXI4RegisterRouter(
-    params.address,
-    beatBytes=beatBytes,
-    interrupts = 0,
-    concurrency = 1)(
-      new AXI4RegBundle(params, _) with TDPMemBundle)(
-      new AXI4RegModule(params, _, _) with TDPMemModule)
 
 // java -jar rocket-chip/sbt-launch.jar ++2.12.4 "runMain freechips.rocketchip.system.Generator /home/julian/RISCV/freedom-e/builds/e300artydevkit sifive.freedom.everywhere.e300artydevkit E300ArtyDevKitFPGAChip sifive.freedom.everywhere.e300artydevkit E300ArtyDevKitConfig"
 
@@ -85,7 +151,7 @@ trait CanHavePeripheryTDPMemListModuleImp extends LazyModuleImp {
     case Some(tdpmem) => { 
       Some(tdpmem.map{ case (tmod: Either[TLTDPMem, (AXI4TDPMem, TLToAXI4)], crossing: TLAsyncCrossingSink) =>
         tmod match{
-          case Right((mod, toaxi4)) =>{
+          /*case Right((mod, toaxi4)) =>{
             val c = mod.module.params
             /*val wdog = IO(new WDIO( c.Resets ))
 
@@ -94,7 +160,7 @@ trait CanHavePeripheryTDPMemListModuleImp extends LazyModuleImp {
             crossing.module.clock := clock
             toaxi4.module.clock := clock
             clock
-          }
+          }*/
           case Left(mod) =>{
             val c = mod.module.params
             /*val wdog = IO(new WDIO( c.Resets ))
@@ -116,7 +182,7 @@ object TLTDPMem {
 
   def attach(params: TDPMemParams, parameter: Parameters, pBus: PeripheryBus, iBus: InterruptBusWrapper) : (Either[TLTDPMem, (AXI4TDPMem, TLToAXI4)],TLAsyncCrossingSink) = {
     implicit val p = parameter
-    if (params.useAXI4){
+   /* if (params.useAXI4){
       val name = s"axi4TDPMem_${nextId()}"
       val crossing = LazyModule(new TLAsyncCrossingSink(AsyncQueueParams.singleton()))
       val tlaxi4 = LazyModule(new TLToAXI4())
@@ -134,16 +200,23 @@ object TLTDPMem {
       //iBus.fromSync := IntSyncCrossingSink() := IntSyncCrossingSource(alreadyRegistered = true)  := tdpmem.intnode // Ibus -> Connecting to Interruptsystem
       
       (Right(tdpmem, tlaxi4),crossing)
-    }else{
+    }else{*/
+
+      
       val name = s"tlTDPMem_${nextId()}"
       val crossing = LazyModule(new TLAsyncCrossingSink(AsyncQueueParams.singleton()))
       val tdpmem = LazyModule(new TLTDPMem(params, pBus.beatBytes)(p))
       tdpmem.suggestName(name)
-      val node = tdpmem.node := crossing.node 
-      pBus.toVariableWidthSlave(Some(name)) { node := TLAsyncCrossingSource() }  // Pbus -> Connecting to PeripherialBus // sbus -> Systembus
-      //iBus.fromSync := IntSyncCrossingSink() := IntSyncCrossingSource(alreadyRegistered = true)  := tdpmem.intnode // Ibus -> Connecting to Interruptsystem
+      val node = tdpmem.controlNode := crossing.node 
       
+      pBus.toVariableWidthSlave(Some(name)) { node := TLAsyncCrossingSource() }  // Pbus -> Connecting to PeripherialBus // sbus -> Systembus
+      pBus.coupleTo(s"mem_named_$name") { tdpmem.fnode := TLFragmenter(1, pBus.blockBytes) := TLWidthWidget(pBus.beatBytes) := _} 
+      if (tdpmem.nInterrupts > 0){
+        iBus.fromSync := IntSyncCrossingSink() := IntSyncCrossingSource(alreadyRegistered = true)  := tdpmem.intnode // Ibus -> Connecting to Interruptsystem
+      }
+      //var tdpNode = None 
+      val tdpNode = tdpmem.ioNode.makeSink()(parameter)//.makeIO()(parameter)  //[TDPMemBundle]
       (Left(tdpmem),crossing)
-    }
+   // }
   }
 }
