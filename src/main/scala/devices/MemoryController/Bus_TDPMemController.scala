@@ -40,7 +40,7 @@ class TDPMemModule(c: TDPMemParams, outer: TLTDPMem) extends LazyModuleImp(outer
   //outer.interrupts(0)
 //outer.port
   val (f, n) = outer.fnode.in(0)
-  val a_channel = RegEnable(f.a.bits, f.a.fire())
+  val a_channel = RegEnable(f.a.bits, f.a.valid)
 
   //var a = None
   //a = f.d.bits
@@ -61,9 +61,17 @@ class TDPMemModule(c: TDPMemParams, outer: TLTDPMem) extends LazyModuleImp(outer
     f.a.read := false.B
   }*/
   val valid = RegInit(false.B)
-  f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel, counter)
+  when(a_channel.opcode === 0.U){
+    f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel)
+    when(RegNext(f.a.valid)){
+      counter := a_channel.data
+    }
+  }.otherwise{
+    f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel, counter)
+  }
+  
   f.d.valid := valid
-  when(f.a.ready){
+  when(f.a.valid){
     valid := true.B
   }.elsewhen(f.d.ready){
     valid := false.B
@@ -111,6 +119,7 @@ abstract class TLTDPMemBase( c: TDPMemParams, beatBytes:Int)(implicit p: Paramet
       regionType  = RegionType.UNCACHED,
       executable  = false,  // No Executable Code
       supportsGet = TransferSizes(1, 1),  // Transfer Size in Bytes(min, max) 
+      supportsPutFull = TransferSizes(1, 1),  // Transfer Size in Bytes(min, max) 
       fifoId      = Some(0))),
     beatBytes = 1)))
 
