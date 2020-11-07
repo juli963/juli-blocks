@@ -36,49 +36,39 @@ class TDPMemModule(c: TDPMemParams, outer: TLTDPMem) extends LazyModuleImp(outer
 {
   val params = c
 
-  val mem = Module( new TDPMem(regWidth = c.regBytes*8, Indizes = (c.sizeBytes.toFloat/c.regBytes.toFloat).ceil.toInt ))
+  val mem = Module( new TDPMem(regWidth = 8/*c.regBytes*8*/, Indizes = (c.sizeBytes.toFloat/c.regBytes.toFloat).ceil.toInt ))
   //outer.interrupts(0)
-//outer.port
+  //outer.port
+
+    /*val address = Input(UInt(log2Ceil(Indizes).W))
+    val wrdata = Input(UInt(8.W))
+    val wren = Input(Bool())
+    val rddata = Output(UInt(8.W))*/
+
   val (f, n) = outer.fnode.in(0)
-  val a_channel = RegEnable(f.a.bits, f.a.valid)
-
-  //var a = None
-  //a = f.d.bits
-
+  val a_channel = RegEnable(f.a.bits, f.a.fire())
+  val d_valid = RegInit(false.B)
+  val a_valid_ff = RegNext(f.a.valid)
+  //val a_ready = RegNext(f.a.valid)  // 1 Clock Delay
   f.b.valid := Bool(false)
   f.c.ready := Bool(true)
   f.e.ready := Bool(true)
-  
-
-  val counter = RegInit(0.U(8.W))
-  when(f.a.fire()){
-    counter := counter + 1.U
-  }
   f.a.ready := f.a.valid
-  /*when(f.a.valid){
-    f.a.ready := true.B
-  }.otherwise{
-    f.a.read := false.B
-  }*/
-  val valid = RegInit(false.B)
-  when(a_channel.opcode === 0.U){
-    f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel)
-    when(RegNext(f.a.valid)){
-      counter := a_channel.data
-    }
-  }.otherwise{
-    f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel, counter)
-  }
-  
-  f.d.valid := valid
-  when(f.a.valid){
-    valid := true.B
+  f.d.valid := d_valid
+  mem.io.wren := f.a.bits.opcode === 0.U && f.a.valid
+  mem.io.wrdata := f.a.bits.data
+  mem.io.address := f.a.bits.address
+
+  when(f.a.bits.opcode === 0.U && f.a.valid){   // PutFull
+    f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel)  //AccessAck
+    d_valid := true.B
+  }.elsewhen(a_channel.opcode === 4.U && a_valid_ff){  // Get
+    f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel, mem.io.rddata) //AccessAckData
+    d_valid := true.B
   }.elsewhen(f.d.ready){
-    valid := false.B
+    d_valid := false.B
   }
-  
-  
-  //    println("Roll Number = " + n.bundle.dataBits);
+
 
   //var ct = None
   //private val (f, n) = fnode.in(0)
