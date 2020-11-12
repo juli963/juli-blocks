@@ -36,7 +36,7 @@ class TDPMemModule(c: TDPMemParams, outer: TLTDPMem) extends LazyModuleImp(outer
 {
   val params = c
 
-  val mem = Module( new TDPMem(regWidth = 8/*c.regBytes*8*/, Indizes = (c.sizeBytes.toFloat/c.regBytes.toFloat).ceil.toInt ))
+  val mem = Module( new TDPMem(regWidth = 8/*c.regBytes*8*/, Indizes = (c.sizeBytes.toFloat).ceil.toInt ))
   //outer.interrupts(0)
   //outer.port
 
@@ -46,29 +46,71 @@ class TDPMemModule(c: TDPMemParams, outer: TLTDPMem) extends LazyModuleImp(outer
     val rddata = Output(UInt(8.W))*/
 
   val (f, n) = outer.fnode.in(0)
-  val a_channel = RegEnable(f.a.bits, f.a.fire())
   val d_valid = RegInit(false.B)
-  val a_valid_ff = RegNext(f.a.valid)
-  //val a_ready = RegNext(f.a.valid)  // 1 Clock Delay
+  val a_ready = RegInit(true.B)  
+  val wrdata = RegInit(0.U(8.W))  
+  val wren = RegInit(false.B)  
+  val address = RegInit(0.U(log2Ceil(c.sizeBytes).W))  
+  val ( s_idle :: s_read0 :: s_read1 :: s_read2 :: s_write :: s_finish  :: Nil) = Enum(6)
+  val state = RegInit(s_idle)
+  val a_channel = RegEnable(f.a.bits, f.a.fire())
+  val d_channel = RegInit(f.d.bits)
   f.b.valid := Bool(false)
   f.c.ready := Bool(true)
   f.e.ready := Bool(true)
-  f.a.ready := f.a.valid
+  f.a.ready := a_ready
   f.d.valid := d_valid
-  mem.io.wren := f.a.bits.opcode === 0.U && f.a.valid
-  mem.io.wrdata := f.a.bits.data
-  mem.io.address := f.a.bits.address
 
-  when(f.a.bits.opcode === 0.U && f.a.valid){   // PutFull
-    f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel)  //AccessAck
-    d_valid := true.B
-  }.elsewhen(a_channel.opcode === 4.U && a_valid_ff){  // Get
-    f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel, mem.io.rddata) //AccessAckData
-    d_valid := true.B
-  }.elsewhen(f.d.ready){
-    d_valid := false.B
+  mem.io.wren := wren
+  mem.io.wrdata := wrdata
+  mem.io.address := address
+
+  f.d.bits := d_channel
+  //f.d.bits := outer.fnode.edges.in.head.AccessAck(a_channel, mem.io.rddata) //AccessAckData
+  switch(state){
+    is(s_idle){
+      d_valid := false.B
+      
+      when(f.a.fire()){
+        when(f.a.bits.opcode === 0.U){
+          a_ready := false.B
+          wrdata := f.a.bits.data
+          state := s_write
+        }.elsewhen(f.a.bits.opcode === 4.U){
+          a_ready := false.B
+          state := s_read0
+        }
+        address := f.a.bits.address
+      }.otherwise{
+        a_ready := true.B
+      }
+    }
+    is(s_read0){    // Wait States for Data to get Ready
+      state := s_read1
+    }
+    is(s_read1){
+      state := s_read2
+    }
+    is(s_read2){
+      d_valid := true.B
+      d_channel := outer.fnode.edges.in.head.AccessAck(a_channel, mem.io.rddata) //AccessAckData
+      state := s_finish
+    }
+    is(s_write){
+      wren := true.B
+      d_channel := outer.fnode.edges.in.head.AccessAck(a_channel)  //AccessAck
+      d_valid := true.B
+      state := s_finish
+    }
+    is(s_finish){
+      wren := false.B
+      when(f.d.fire()){
+        d_valid := false.B
+        a_ready := true.B
+        state := s_idle
+      }
+    }
   }
-
 
   //var ct = None
   //private val (f, n) = fnode.in(0)
@@ -114,6 +156,7 @@ abstract class TLTDPMemBase( c: TDPMemParams, beatBytes:Int)(implicit p: Paramet
     beatBytes = 1)))
 
   override def nInterrupts = 0
+  val memXing = this.crossIn(fnode)
 }
 
 class TLTDPMem(c: TDPMemParams, w: Int)(implicit p: Parameters)
@@ -209,7 +252,7 @@ object TLTDPMem {
       val node = tdpmem.controlNode := crossing.node 
       
       pBus.toVariableWidthSlave(Some(name)) { node := TLAsyncCrossingSource() }  // Pbus -> Connecting to PeripherialBus // sbus -> Systembus
-      pBus.coupleTo(s"mem_named_$name") { tdpmem.fnode := TLFragmenter(1, pBus.blockBytes) := TLWidthWidget(pBus.beatBytes) := _} 
+      pBus.coupleTo(s"mem_named_$name") { tdpmem.memXing(NoCrossing) := TLFragmenter(1, pBus.blockBytes) := TLBuffer(BufferParams(8), BufferParams.none) := TLWidthWidget(pBus.beatBytes) := _} 
       if (tdpmem.nInterrupts > 0){
         iBus.fromSync := IntSyncCrossingSink() := IntSyncCrossingSource(alreadyRegistered = true)  := tdpmem.intnode // Ibus -> Connecting to Interruptsystem
       }
