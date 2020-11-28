@@ -17,7 +17,9 @@ import freechips.rocketchip.interrupts._
 import freechips.rocketchip.regmapper._
 import freechips.rocketchip.tilelink._
 
-import sifive.blocks.util.{SlaveRegIF, GenericTimerIO, GenericTimer, GenericTimerCfgDescs, DefaultGenericTimerCfgDescs}
+import sifive.blocks.util.{SlaveRegIF}
+
+import juli.blocks.devices.swapper._
 
 case class TDPMemParams(address: BigInt = 0x2000, regBytes: Int = 4, useAXI4: Boolean = false, sizeBytes: Int = 32, fAddress : BigInt = 0x3000, fSize : Int = 32) 
 {
@@ -115,6 +117,7 @@ class TDPMemModule(c: TDPMemParams, outer: TLTDPMem) extends LazyModuleImp(outer
   //var ct = None
   //private val (f, n) = fnode.in(0)
   //ct = n.bundle.dataBits
+
   println("TDP Mem Bus Parameters: ")
   println("Data Bits = " + n.bundle.dataBits);
   println("Address Bits = " + n.bundle.addressBits);
@@ -122,13 +125,11 @@ class TDPMemModule(c: TDPMemParams, outer: TLTDPMem) extends LazyModuleImp(outer
   println("Sink Bits = " + n.bundle.sinkBits);
   println("Size Bits = " + n.bundle.sizeBits);
 
-  //val s = IO(new SlaveRegIF(1))
-  //val sreg = RegEnable(s.write.bits,s.write.valid)
-  //s.read := sreg
-  //protected def wr_desc:        RegFieldDesc = RegFieldDesc(s"write", "Write Enable")
-
-  //val regmap_f =  Seq( c.regBytes*0 -> Seq(s.toRegField(Some(wr_desc))) )  //TDPMem.RegMap(mem, c.regBytes) 
-
+  val swapper = Module(new Mod_ByteSwapper(8, c.regBytes)) // Byte Swapper with 64Bit Input
+  swapper.clock := clock
+  swapper.reset := reset
+  protected val regmap_f =  ByteSwapper.RegMap(swapper, 0, c.regBytes)
+                  
 }
 
 abstract class TLTDPMemBase( c: TDPMemParams, beatBytes:Int)(implicit p: Parameters) extends IORegisterRouter(
@@ -164,8 +165,9 @@ class TLTDPMem(c: TDPMemParams, w: Int)(implicit p: Parameters)
     with HasTLControlRegMap {
   lazy val module = new TDPMemModule(c, this) {
 
-    //regmap(regmap_f :_*)
+    regmap(regmap_f :_*)
   }
+  //regmap(module.regmap_f :_*)
 }
 
 class AXI4TDPMem(params: TDPMemParams, beatBytes: Int)(implicit p: Parameters)
