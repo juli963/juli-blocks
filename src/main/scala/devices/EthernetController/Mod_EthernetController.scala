@@ -56,7 +56,7 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
   val mem_RX = Module(new TrueDualPortBRAM(Indizes*NumBuffers, UInt(8.W)))
   val mem_TX = Module(new TrueDualPortBRAM(Indizes*NumBuffers, UInt(8.W)))
   val m_fifo = Module(new Ethernet.Protocol.EthernetFIFO8())
-  val m_rgmii = Module(new Ethernet.Interface.RGMII.RGMII(sim = true,canForceSpeed = true))
+  val m_rgmii = Module(new Ethernet.Interface.RGMII.RGMII(canForceSpeed = true))
   m_rgmii.clock := io.EthernetClock125
 
   // Register
@@ -120,11 +120,12 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
   mem_RX.io.clockB := io.EthernetClock125 
   mem_TX.io.clockB := io.EthernetClock125 
   m_fifo.io.EthernetBus.busclock := io.EthernetClock125 
-
+  io.PHY_nrst := ~reset.toBool
+  
   // PHY Logic Here
   withClock(io.EthernetClock125){
     io.RGMII <> m_rgmii.io.PHY 
-    io.PHY_nrst := ~reset.toBool
+    
     m_rgmii.io.clk_250M := io.EthernetClock250
     m_fifo.io.PHYStat := m_rgmii.io.PHYStat 
     m_rgmii.io.Bus <> m_fifo.io.PHYBus
