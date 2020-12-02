@@ -1,14 +1,16 @@
 
-# True Dual Port Mem Controller  
+# Ethernet Controller
   
 **Parameters**  
 |Parameter| Description|
 |---|---|
-|Address|Busaddress|
+|address|Register Address (Registers)|
 |regBytes |Buswidth in Bytes|
 |sizeBytes|Size of 1 Buffer in Bytes|
+|fAddress |Memory Address (Buffers)|
 |numBuffers|Number of Buffers|
-|useAXI4|When True then Mem is connected over AXI
+|sizeBuffer|Size of 1 Buffer|
+|useAXI4|When True then Mem is connected over AXI -> Not supported yet|
   
 **Registermap**  
 Buffer Address 0 -> Length of Buffer RX/TX Data in Bytes   
@@ -17,11 +19,17 @@ Buffer Address 0 -> Length of Buffer RX/TX Data in Bytes
 |0x00| PHY Control| 
 |0x04 | TX Control | 
 |0x08 | RX Status | 
-|0x0C | TX Buffer Address | 
-|0x10 | TX Buffer Data | 
-|0x14 | RX Buffer Address | 
-|0x18 | RX Buffer Data | 
+|0x0C-0x13| Reserved|
+|0x14-0x44| Byte Swapper|
   
+**Memory Organization**
+Buffer Address 0 -> Length of Buffer RX/TX Data in Bytes   
+|Address |Name |
+|----|----|
+|address| Registerinterface| 
+|fAddress | TX Buffers | 
+|fAddress+(numBuffers*sizeBuffer) | RX Buffers | 
+
 **PHY Control**    
 |Bit #|Name |
 |----|----|
@@ -33,7 +41,7 @@ Buffer Address 0 -> Length of Buffer RX/TX Data in Bytes
 **TX Control**   
 |Bit #|Name |
 |----|----|
-|0 | Write Enable |
+|0 | Reserved |
 |1 | Start Transmission (RTrig) |
 |2 | Transmission in Progress |
 |15-8 | Buffer Select |

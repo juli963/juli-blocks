@@ -20,14 +20,16 @@ class TDPMem(regWidth: Int = 32, Indizes: Int = 5) extends Module {
   
   val mem = Module(new TrueDualPortBRAM(Indizes, UInt(regWidth.W)))
   // Register
-  mem.io.MemIO.wr := io.wren
-  mem.io.MemIO.wrAddr := io.address
-  mem.io.MemIO.wrData := io. wrdata
-  mem.io.MemIO.rdAddr := io.address
-  io.rddata := mem.io.MemIO.rdData
+  mem.io.MemA.wr := io.wren
+  mem.io.MemA.wrData := io. wrdata
+  mem.io.MemB.wr := false.B
+  mem.io.MemB.wrData := 0.U
+  mem.io.MemB.Addr := io.address
+  mem.io.MemA.Addr := io.address
+  io.rddata := mem.io.MemB.rdData
 
 
-  mem.io.clockWr := clock
-  mem.io.clockRd := clock
+  mem.io.clockA := clock
+  mem.io.clockB := clock
 
 }

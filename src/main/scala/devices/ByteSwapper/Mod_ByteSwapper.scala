@@ -77,14 +77,14 @@ object ByteSwapper {
     def RegMap (mod: Mod_ByteSwapper, offset: Int, regBytes: Int): Seq[(Int, Seq[RegField])] = {
         var id = 0
         val regmap_in =  for (i <- 0 until mod.swap_in.length) yield{
-                val seq = Seq( regBytes*id + offset -> Seq(mod.swap_in(i).toRegField(Some(mod.swap_in_desc(i)))) )
+                val seq = Seq( regBytes*(id + offset) -> Seq(mod.swap_in(i).toRegField(Some(mod.swap_in_desc(i)))) )
                 id = id + 1
                 seq
         }
 
         val regmap_out = Seq.tabulate(mod.swap_out.length) {i=> 
                                 for (x <- 0 until mod.swap_out(i).length ) yield{
-                                  val out = Seq(regBytes*id + offset -> Seq(mod.swap_out(i)(x).toRegField(Some( mod.swap_out_desc(i, x) )) ))
+                                  val out = Seq(regBytes*(id + offset) -> Seq(mod.swap_out(i)(x).toRegField(Some( mod.swap_out_desc(i, x) )) ))
                                   id = id + 1
                                   out
                                 }

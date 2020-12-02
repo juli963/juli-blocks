@@ -144,6 +144,8 @@ abstract class TLTDPMemBase( c: TDPMemParams, beatBytes:Int)(implicit p: Paramet
 
   require(isPow2(c.fSize))
   require(isPow2(c.sizeBytes))
+  require((c.fAddress % 4) == 0) // Alignment to 32Bit
+  require((c.address % 4) == 0) // Alignment to 32Bit
 
   val fnode = TLManagerNode(Seq(TLManagerPortParameters(
     managers = Seq(TLManagerParameters(

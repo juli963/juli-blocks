@@ -17,6 +17,7 @@ import chisel3.util._
 import freechips.rocketchip.regmapper._
 
 import Ethernet.Interface.Types._
+import juli.blocks.devices.swapper._
 
 case class ETHCtrlParams(address: BigInt = 0x2000, regBytes: Int = 4, useAXI4: Boolean = false, sizeBytes: Int = 32, fAddress: BigInt = 0x8000, NumBuffers: Int = 4) 
 {
@@ -38,26 +39,103 @@ class ETHPort(c: ETHCtrlParams) extends Bundle{
 
 class ETHCtrlModule(c: ETHCtrlParams, outer: TLETHCtrl) extends LazyModuleImp(outer)
 {
+
   val (f, n) = outer.fnode.in(0)
-  println("ETH Bus Parameters: ")
-  println("Data Bits = " + n.bundle.dataBits);
-  println("Address Bits = " + n.bundle.addressBits);
-  println("Source Bits = " + n.bundle.sourceBits);
-  println("Sink Bits = " + n.bundle.sinkBits);
-  println("Size Bits = " + n.bundle.sizeBits);
 
-
-
-  val eth = Module( new ETHCtrl(regWidth = c.regBytes*8, Indizes = (c.sizeBytes.toFloat/c.regBytes.toFloat).ceil.toInt, NumBuffers = c.NumBuffers) )
+  val eth = Module( new ETHCtrl(regBytes = c.regBytes, Indizes = c.sizeBytes, NumBuffers = c.NumBuffers) )
   outer.interrupts(0) := eth.io.interrupt
   outer.port.RGMII <> eth.io.RGMII
   outer.port.PHY_nrst := eth.io.PHY_nrst
   eth.io.EthernetClock125 := outer.port.EthernetClock125
   eth.io.EthernetClock250 := outer.port.EthernetClock250
- /* regmap(
-      (ETHCtrl.RegMap(eth, c.regBytes) :_*)
-    ) */
-    val regmap_val = ETHCtrl.RegMap(eth, c.regBytes)
+
+  val d_valid = RegInit(false.B)
+  val a_ready = RegInit(true.B)  
+  val wrdata = RegInit(0.U(8.W))  
+  val TXwren = RegInit(false.B)   
+  val RXwren = RegInit(false.B)  
+  val address = RegInit(0.U(log2Ceil(c.sizeBytes*2*c.NumBuffers).W))  // 2 Times -> TX and RX Buffer 
+  val ( s_idle :: s_read0 :: s_read1 :: s_read2 :: s_write :: s_finish  :: Nil) = Enum(6)
+  val state = RegInit(s_idle)
+  val a_channel = RegEnable(f.a.bits, f.a.fire())
+  val d_channel = RegInit(f.d.bits)
+  f.b.valid := Bool(false)
+  f.c.ready := Bool(true)
+  f.e.ready := Bool(true)
+  f.a.ready := a_ready
+  f.d.valid := d_valid
+
+  eth.io.TXwrena := TXwren
+  eth.io.TXwrdata := wrdata
+  eth.io.RXwrena := RXwren
+  eth.io.RXwrdata := wrdata
+  eth.io.RXaddr := address - (c.sizeBytes * c.NumBuffers).U // Minus RX Offset
+  eth.io.TXaddr := address
+
+  f.d.bits := d_channel
+  switch(state){
+    is(s_idle){
+      d_valid := false.B
+      
+      when(f.a.fire()){
+        when(f.a.bits.opcode === 0.U){
+          a_ready := false.B
+          when(f.a.bits.address >= (c.sizeBytes * c.NumBuffers).U){
+            wrdata := f.a.bits.data
+          }.otherwise{
+            wrdata := f.a.bits.data
+          }
+          state := s_write
+        }.elsewhen(f.a.bits.opcode === 4.U){
+          a_ready := false.B
+          state := s_read0
+        }
+        address := f.a.bits.address
+      }.otherwise{
+        a_ready := true.B
+      }
+    }
+    is(s_read0){    // Wait States for Data to get Ready
+      state := s_read1
+    }
+    is(s_read1){
+      state := s_read2
+    }
+    is(s_read2){
+      d_valid := true.B
+      when(f.a.bits.address >= (c.sizeBytes * c.NumBuffers).U){
+        d_channel := outer.fnode.edges.in.head.AccessAck(a_channel, eth.io.RXrddata) //AccessAckData
+      }.otherwise{
+        d_channel := outer.fnode.edges.in.head.AccessAck(a_channel, eth.io.TXrddata) //AccessAckData
+      }
+      state := s_finish
+    }
+    is(s_write){
+      when(f.a.bits.address >= (c.sizeBytes * c.NumBuffers).U){
+        RXwren := true.B
+      }.otherwise{
+        TXwren := true.B
+      }
+      d_channel := outer.fnode.edges.in.head.AccessAck(a_channel)  //AccessAck
+      d_valid := true.B
+      state := s_finish
+    }
+    is(s_finish){
+      TXwren := false.B
+      RXwren := false.B
+      when(f.d.fire()){
+        d_valid := false.B
+        a_ready := true.B
+        state := s_idle
+      }
+    }
+  }
+
+  val swapper = Module(new Mod_ByteSwapper(8, c.regBytes)) // Byte Swapper with 64Bit Input
+  swapper.clock := clock
+  swapper.reset := reset
+
+  val regmap_val = ETHCtrl.RegMap(eth, c.regBytes) ++ ByteSwapper.RegMap(swapper, 5, c.regBytes) // 5 RegBytes Offset
 }
 
 abstract class TLETHCtrlBase( c: ETHCtrlParams, beatBytes:Int)(implicit p: Parameters) extends IORegisterRouter(
@@ -65,17 +143,18 @@ abstract class TLETHCtrlBase( c: ETHCtrlParams, beatBytes:Int)(implicit p: Param
         name = "ETHCtrl",
         compat = Seq("juli,ETHCtrl"),
         base = c.address,
-        size = 0x40,
+        size = 0x200,//Registersize in Bytes? //0x40,
         beatBytes = beatBytes),
       new ETHPort(c))
     with HasInterruptSources {
 
   require(isPow2(c.sizeBytes))
-  //require(isPow2(c.sizeBytes))
+  require((c.fAddress % 8) == 0, "ETHCtrl Mem is not Aligned") // Alignment to 32Bit
+  require((c.address % 8) == 0, "ETHCtrl Reg is not Aligned") // Alignment to 32Bit
 
   val fnode = TLManagerNode(Seq(TLManagerPortParameters(
     managers = Seq(TLManagerParameters(
-      address     = Seq(AddressSet(c.fAddress, c.sizeBytes-1)),
+      address     = Seq(AddressSet(c.fAddress, (c.sizeBytes*c.NumBuffers*2)-1)),
       resources   = device.reg("mem"),
       regionType  = RegionType.UNCACHED,
       executable  = false,  // No Executable Code
@@ -85,6 +164,7 @@ abstract class TLETHCtrlBase( c: ETHCtrlParams, beatBytes:Int)(implicit p: Param
     beatBytes = 1)))
 
   override def nInterrupts = 1
+  val memXing = this.crossIn(fnode)
 }
 
 class TLETHCtrl(c: ETHCtrlParams, w: Int)(implicit p: Parameters)
@@ -186,7 +266,7 @@ object TLETHCtrl {
       val node = ethctrl.controlNode := crossing.node 
 
       pBus.toVariableWidthSlave(Some(name)) { node := TLAsyncCrossingSource() }  // Pbus -> Connecting to PeripherialBus // sbus -> Systembus
-      pBus.coupleTo(s"mem_named_$name") { ethctrl.fnode := TLFragmenter(1, pBus.blockBytes) := TLWidthWidget(pBus.beatBytes) := _} 
+      pBus.coupleTo(s"mem_named_$name") { ethctrl.memXing(NoCrossing) := TLFragmenter(1, pBus.blockBytes) := TLBuffer(BufferParams(8), BufferParams.none)  := TLWidthWidget(pBus.beatBytes) := _} 
       if (ethctrl.nInterrupts > 0){
         iBus.fromSync := IntSyncCrossingSink() := IntSyncCrossingSource(alreadyRegistered = true)  := ethctrl.intnode // Ibus -> Connecting to Interruptsystem
       }
