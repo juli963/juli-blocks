@@ -13,7 +13,7 @@
 |useAXI4|When True then Mem is connected over AXI -> Not supported yet|
   
 **Registermap**  
-Buffer Address 0 -> Length of Buffer RX/TX Data in Bytes   
+Buffer Address 0 -> Length of Buffer RX/TX Data in Bytes, without Length Bytes, only Data (Size of 4 Bytes)  
 |Offset |Name |
 |----|----|
 |0x00| PHY Control| 

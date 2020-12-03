@@ -72,6 +72,13 @@ class ETHCtrlModule(c: ETHCtrlParams, outer: TLETHCtrl) extends LazyModuleImp(ou
   eth.io.RXaddr := address - (c.sizeBytes * c.NumBuffers).U // Minus RX Offset
   eth.io.TXaddr := address
 
+  println("ETH Ctrl Bus Parameters: ")
+  println("Data Bits = " + n.bundle.dataBits);
+  println("Address Bits = " + n.bundle.addressBits);
+  println("Source Bits = " + n.bundle.sourceBits);
+  println("Sink Bits = " + n.bundle.sinkBits);
+  println("Size Bits = " + n.bundle.sizeBits);
+
   f.d.bits := d_channel
   switch(state){
     is(s_idle){
@@ -80,17 +87,13 @@ class ETHCtrlModule(c: ETHCtrlParams, outer: TLETHCtrl) extends LazyModuleImp(ou
       when(f.a.fire()){
         when(f.a.bits.opcode === 0.U){
           a_ready := false.B
-          when(f.a.bits.address >= (c.sizeBytes * c.NumBuffers).U){
-            wrdata := f.a.bits.data
-          }.otherwise{
-            wrdata := f.a.bits.data
-          }
+          wrdata := f.a.bits.data
           state := s_write
         }.elsewhen(f.a.bits.opcode === 4.U){
           a_ready := false.B
           state := s_read0
         }
-        address := f.a.bits.address
+        address := f.a.bits.address - "h8000".U
       }.otherwise{
         a_ready := true.B
       }
@@ -103,7 +106,7 @@ class ETHCtrlModule(c: ETHCtrlParams, outer: TLETHCtrl) extends LazyModuleImp(ou
     }
     is(s_read2){
       d_valid := true.B
-      when(f.a.bits.address >= (c.sizeBytes * c.NumBuffers).U){
+      when(address >= (c.sizeBytes * c.NumBuffers).U){
         d_channel := outer.fnode.edges.in.head.AccessAck(a_channel, eth.io.RXrddata) //AccessAckData
       }.otherwise{
         d_channel := outer.fnode.edges.in.head.AccessAck(a_channel, eth.io.TXrddata) //AccessAckData
@@ -111,7 +114,7 @@ class ETHCtrlModule(c: ETHCtrlParams, outer: TLETHCtrl) extends LazyModuleImp(ou
       state := s_finish
     }
     is(s_write){
-      when(f.a.bits.address >= (c.sizeBytes * c.NumBuffers).U){
+      when(address >= (c.sizeBytes * c.NumBuffers).U){
         RXwren := true.B
       }.otherwise{
         TXwren := true.B

@@ -1,6 +1,7 @@
 package juli.blocks.devices.ethctrl
 
 import Memory.onChip.TrueDualPortBRAM
+import FIFO.Incremental_FIFO
 
 import chisel3._
 import chisel3.util._
@@ -121,7 +122,7 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
   mem_TX.io.clockB := io.EthernetClock125 
   m_fifo.io.EthernetBus.busclock := io.EthernetClock125 
   io.PHY_nrst := ~reset.toBool
-  
+
   // PHY Logic Here
   withClock(io.EthernetClock125){
     io.RGMII <> m_rgmii.io.PHY 
@@ -132,7 +133,7 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
 
     def TX_FSM_busy: Bool = {
         val start_Trig = RegNext(RegNext(start_TX && ~start_TX_ff))
-        val ( s_idle :: s_delay0 :: s_delay1 :: s_getLength :: s_send_Data :: s_finish :: Nil) = Enum(6)
+        val ( s_idle :: s_delay :: s_getLength :: s_send_Data :: s_finish :: Nil) = Enum(5)
         val state = RegInit(s_idle)
         state.suggestName("State_TX")
         val byteCounter = RegInit(0.U( log2Ceil(Indizes).W ))
@@ -140,15 +141,27 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
         val shiftCounter = RegInit(0.U( log2Ceil(6).W ))
         shiftCounter.suggestName("shiftCounter_TX")
         val selectedBuffer = RegNext(RegNext(buffer_TX))
-        val data = mem_TX.io.MemB.rdData
-        val address = RegInit(0.U(log2Ceil(Indizes*NumBuffers).W))
-        mem_TX.io.MemB.Addr := address
-        mem_TX.io.MemB.wrData := 0.U
-        mem_TX.io.MemB.wr := false.B
         
+        val address = RegInit(0.U(log2Ceil(Indizes*NumBuffers).W))
+        //mem_TX.io.MemB.Addr := address
+        //mem_TX.io.MemB.wrData := 0.U
+        //mem_TX.io.MemB.wr := false.B
+        
+        val memFifo = Module(new Incremental_FIFO(8, Indizes*NumBuffers, UInt(8.W)))
+        val data = memFifo.io.deq.data
+        memFifo.io.Mem <> mem_TX.io.MemB
+        memFifo.io.addr_init := address
+        val clr_fifo = RegInit(false.B)
+        val en_fifo = RegInit(false.B)
+        memFifo.io.clr := clr_fifo
+        memFifo.io.deq.en := en_fifo
+
         val frun = RegInit(false.B)
         val fstrb = RegInit(0.U(1.W))
         val fdata = RegInit(0.U(8.W))
+        fdata.suggestName("ETHData_TX")
+        fstrb.suggestName("ETHStrb_TX")
+        frun.suggestName("ETHen_TX")
         m_fifo.io.EthernetBus.tx.run := frun
         m_fifo.io.EthernetBus.tx.data := fdata
         m_fifo.io.EthernetBus.tx.strb := fstrb
@@ -157,50 +170,59 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
           is(s_idle){
             frun := false.B
             when(start_Trig){
+              byteCounter := 0.U
               address := (selectedBuffer * Indizes.U)+0.U
-              state := s_delay0
+              clr_fifo := true.B
+              state := s_delay
               shiftCounter := 0.U
             }
           }
-          is(s_delay0){
-            state := s_delay1
-            address := address + 1.U
-          }
-          is(s_delay1){
-            state := s_getLength
-            address := address + 1.U
+          is(s_delay){
+            clr_fifo := false.B
+            when(~memFifo.io.deq.empty && ~clr_fifo){
+              en_fifo := true.B
+              state := s_getLength
+            } 
+            //address := address + 1.U
           }
           is(s_getLength){
             
             when(shiftCounter > 3.U){
+              en_fifo := false.B
               when( m_fifo.io.EthernetBus.tx.ready ){
                 state := s_send_Data
-                byteCounter := byteCounter + 2.U  // Add 2 Bytes, for counting until 0
+                byteCounter := byteCounter - 1.U  // Add 2 Bytes, for counting until 0
                 frun := true.B
+                //en_fifo := true.B
                 shiftCounter := 0.U
               }
             }.otherwise{
               shiftCounter := shiftCounter + 1.U
               byteCounter := byteCounter | (data << (shiftCounter*8.U))
-              when(shiftCounter === 0.U){
+              /*when(shiftCounter === 0.U){
                 address := address + 1.U
-              }
+              }*/
+              
             }
             fdata := 0.U
             fstrb := 0.U
           }
           is(s_send_Data){
             when( m_fifo.io.EthernetBus.tx.ready ){ // FIFO not Full
+              en_fifo := true.B
               byteCounter := byteCounter - 1.U
-              address := address + 1.U
+              //address := address + 1.U
               when(byteCounter === 0.U){
                 state := s_finish
               }
               fdata := data
               fstrb := 1.U
+            }.otherwise{
+              en_fifo := false.B
             }
           }
           is(s_finish){
+            en_fifo := false.B
             when( m_fifo.io.EthernetBus.tx.ready ){
               state := s_idle
             }
@@ -268,10 +290,10 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
               ip := false.B
               error := m_fifo.io.EthernetBus.rx.error
               data := m_fifo.io.EthernetBus.rx.data 
-              byteCounter := 19.U//1.U
+              byteCounter := 15.U//1.U
               shiftCounter := 0.U
               wr := true.B
-              address := (wselectedBuffer * Indizes.U) + 18.U
+              address := (wselectedBuffer * Indizes.U) + 17.U
               selectedBuffer := wselectedBuffer 
               state := s_receive_first
             }
