@@ -49,15 +49,16 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
       val bufferLockRX = new SlaveRegIF(1)
       val bufferStatRX = new SlaveRegIF(8)
       val bufferSelectRX = new SlaveRegIF(8)
-      
-      
+
+      val destMACFilterLow = new SlaveRegIF(32)
+      val destMACFilterHigh = new SlaveRegIF(16)
     }
   })
   
   val mem_RX = Module(new TrueDualPortBRAM(Indizes*NumBuffers, UInt(8.W)))
   val mem_TX = Module(new TrueDualPortBRAM(Indizes*NumBuffers, UInt(8.W)))
   val m_fifo = Module(new Ethernet.Protocol.EthernetFIFO8())
-  val m_rgmii = Module(new Ethernet.Interface.RGMII.RGMII(canForceSpeed = true))
+  val m_rgmii = Module(new Ethernet.Interface.RGMII.RGMII(sim=true, canForceSpeed = true))
   m_rgmii.clock := io.EthernetClock125
 
   // Register
@@ -100,6 +101,11 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
     }
   val bufferSelectRX = RegEnable(io.regs.bufferSelectRX.write.bits, io.regs.bufferSelectRX.write.valid)
     io.regs.bufferSelectRX.read := bufferSelectRX
+  val filterMAC = RegInit(0.U(48.W))
+  when (io.regs.destMACFilterLow.write.valid) { filterMAC := Cat(filterMAC >> 32, io.regs.destMACFilterLow.write.bits) }
+  when (io.regs.destMACFilterHigh.write.valid) { filterMAC := Cat(io.regs.destMACFilterHigh.write.bits, filterMAC(31, 0)) }
+  io.regs.destMACFilterHigh.read := filterMAC(47,32)
+  io.regs.destMACFilterLow.read := filterMAC(31,0)
 
   mem_TX.io.MemA.Addr := io.TXaddr
   mem_TX.io.MemA.wrData := io.TXwrdata
@@ -261,6 +267,7 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
         val wr = RegInit(false.B)
         val ip = RegInit(false.B)
         val eth_info = RegInit(0.U.asTypeOf(m_fifo.io.EthernetBus.rx.info))
+        val filterMACRX = filterMAC
         mem_RX.io.MemB.Addr := address
         mem_RX.io.MemB.wrData := data
         mem_RX.io.MemB.wr := wr
@@ -285,7 +292,11 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
         switch(state){
           is(s_idle){
             wr := false.B
-            when(m_fifo.io.EthernetBus.rx.strb > 0.U){
+            when(m_fifo.io.EthernetBus.rx.strb > 0.U && 
+             (m_fifo.io.EthernetBus.rx.info.destMAC === filterMACRX ||
+              filterMACRX === 0.U ||
+              m_fifo.io.EthernetBus.rx.info.destMAC === "hFFFFFFFFFFFF".U)
+            ){
               eth_info := m_fifo.io.EthernetBus.rx.info
               ip := false.B
               error := m_fifo.io.EthernetBus.rx.error
@@ -398,10 +409,7 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
     RegFieldDesc(s"${prefix}_RXBuffer", "Buffer for Lock"),
     RegFieldDesc(s"${prefix}_RXStat", "Buffer Status", volatile=true)
   )
-  protected def txaddr_desc:    RegFieldDesc = RegFieldDesc(s"${prefix}_wraddr", "Write Address")
-  protected def txdata_desc:    RegFieldDesc = RegFieldDesc(s"${prefix}_wrdata", "Write Data")
-  protected def rxaddr_desc:    RegFieldDesc = RegFieldDesc(s"${prefix}_rdaddr", "Read Address")
-  protected def rxdata_desc:    RegFieldDesc = RegFieldDesc(s"${prefix}_rddata", "Read Data", access=RegFieldAccessType.R, volatile=true)
+  protected def FilterMAC_desc(s : String):    RegFieldDesc = RegFieldDesc(s"${prefix}_filter${s}", s"Filter MAC Address${s}")
 }
 
 object ETHCtrl {
@@ -435,7 +443,8 @@ object ETHCtrl {
                                   mod.io.regs.bufferStatRX.toRegField(Some(mod.RX_desc(4)))
                                 )
                               ))
-
-    PHYCtrl ++ TXCtrl ++ RXCtrl 
+    val filterMAC_l = Seq(regBytes*3 -> Seq(mod.io.regs.destMACFilterLow.toRegField(Some( mod.FilterMAC_desc("_low") )) ))
+    val filterMAC_h = Seq(regBytes*4 -> Seq(mod.io.regs.destMACFilterHigh.toRegField(Some( mod.FilterMAC_desc("_high") )) ))
+    PHYCtrl ++ TXCtrl ++ RXCtrl ++ filterMAC_l ++ filterMAC_h
   }
 }
