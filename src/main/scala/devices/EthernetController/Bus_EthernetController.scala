@@ -31,6 +31,7 @@ case object ETHCtrlListKey extends Field[Option[Seq[ETHCtrlParams]]](None)
 class ETHPort(c: ETHCtrlParams) extends Bundle{
   val params = c
   val RGMII = new Ethernet.Interface.Types.RGMII_Interface()
+  val rx_error = Output(Bool())
   val PHY_nrst = Output(Bool())
   val EthernetClock125 = Input(Clock())
   val EthernetClock250 = Input(Clock())
@@ -46,6 +47,7 @@ class ETHCtrlModule(c: ETHCtrlParams, outer: TLETHCtrl) extends LazyModuleImp(ou
   outer.interrupts(0) := eth.io.interrupt
   outer.port.RGMII <> eth.io.RGMII
   outer.port.PHY_nrst := eth.io.PHY_nrst
+  outer.port.rx_error := eth.io.rx_error
   eth.io.EthernetClock125 := outer.port.EthernetClock125
   eth.io.EthernetClock250 := outer.port.EthernetClock250
 

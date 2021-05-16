@@ -22,6 +22,7 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
     val PHY_nrst = Output(Bool())
     val EthernetClock125 = Input(Clock())
     val EthernetClock250 = Input(Clock())
+    val rx_error = Output(Bool())
     val interrupt = Output(Bool())
 
     val TXwrena   = Input(Bool())
@@ -60,7 +61,7 @@ class ETHCtrl(regBytes: Int = 4, Indizes: Int = 5, NumBuffers: Int = 3) extends 
   val m_fifo = Module(new Ethernet.Protocol.EthernetFIFO8())
   val m_rgmii = Module(new Ethernet.Interface.RGMII.RGMII(sim=true, canForceSpeed = true))
   m_rgmii.clock := io.EthernetClock125
-
+  io.rx_error := m_fifo.io.EthernetBus.rx.error
   // Register
   val PHYForce = RegEnable(io.regs.PHYForce.write.bits, io.regs.PHYForce.write.valid)
   io.regs.PHYForce.read := PHYForce
