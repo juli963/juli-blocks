@@ -12,7 +12,7 @@ import freechips.rocketchip.interrupts._
 import freechips.rocketchip.util._
 import freechips.rocketchip.regmapper._
 import sifive.blocks.util.{SlaveRegIF}
-
+import Ethernet.Protocol._
 
 case class ESP_FIFOParams(useAXI4: Boolean = false
 , reg_slave_0_address : BigInt, reg_slave_0_sizeBytes : Int = 64//0x10
@@ -25,39 +25,77 @@ case object ESP_FIFOKey extends Field[Option[ESP_FIFOParams]](None)
 case object ESP_FIFOListKey extends Field[Option[Seq[ESP_FIFOParams]]](None)
 
 class ESP_FIFOBundle(c:ESP_FIFOParams) extends Bundle{
-	 val params = c
-	 override def cloneType = (new ESP_FIFOBundle(c)).asInstanceOf[this.type]
+	val params = c
+	val UDPBus = new Ethernet.Protocol.OSI4.UDPBus(8)   // Fix to 8
+	val clkUDP = Input(Clock())
+
+	override def cloneType = (new ESP_FIFOBundle(c)).asInstanceOf[this.type]
 }
 
 class TL_ESP_FIFOModule(c:ESP_FIFOParams, outer: TL_ESP_FIFO) extends LazyModuleImp(outer){
+	val mod = Module(new ESP_FIFO())
+	mod.io.UDPBus <> io.UDPBus
+	mod.io.clkUDP := io.clkUDP
+
 	val wreg_0 = Wire(new SlaveRegIF(32))
 	val wreg_1 = Wire(new SlaveRegIF(32))
 	val wreg_2 = Wire(new SlaveRegIF(32))
+	val wreg_3 = Wire(new SlaveRegIF(32))
+	val wreg_4 = Wire(new SlaveRegIF(32))
 	
-	val Data_av = RegEnable(wreg_0.write.bits(26), wreg_0.write.valid)
 	val Get_new_data = RegEnable(wreg_0.write.bits(25), wreg_0.write.valid)
+	val Get_new_data_ff = RegNext(Get_new_data)
+	val deq = Get_new_data && ~Get_new_data_ff
+	val Data_av = ~mod.io.deq_empty
 	val Data_readed = RegInit(false.B)
-	val Send_ack = RegEnable(wreg_0.write.bits(17), wreg_0.write.valid)
-	val Send_nack = RegEnable(wreg_0.write.bits(16), wreg_0.write.valid)
 
-	val Proto_type = RegInit(0.U(8.W))
-	val Proto_cmd = RegInit(0.U(8.W))
-	val Proto_address = RegInit(0.U(8.W))
-	val Proto_data = RegInit(0.U(32.W))
+	val Send = RegEnable(wreg_0.write.bits(17), wreg_0.write.valid)
+	val Send_ff = RegNext(Get_new_data)
+	val enq = Send && ~Send_ff
+	val Full = mod.io.enq_full
 
-	wreg_0.read := Cat(Seq(0.U(5.W), Data_av, Get_new_data, Data_readed, 0.U(6.W), Send_ack , Send_nack, 0.U(8.W), 0.U(8.W)))
-	wreg_1.read := Cat(Seq(Proto_address, Proto_cmd, 0.U(8.W), Proto_type)) 
-	wreg_2.read := Proto_data
+	val trans_type = RegEnable(wreg_3.write.bits(7,0), wreg_3.write.valid)
+	val trans_cmd = RegEnable(wreg_3.write.bits(23,16), wreg_3.write.valid)
+	val trans_address = RegEnable(wreg_3.write.bits(31,24), wreg_3.write.valid)
+	val trans_Ident = RegEnable(wreg_3.write.bits(15,8), wreg_3.write.valid)
+	val trans_Data = RegEnable(wreg_4.write.bits, wreg_4.write.valid)
 
+	wreg_0.read := Cat(Seq(0.U(5.W), Data_av, Get_new_data, Data_readed, 0.U(6.W), Send, Full, 0.U(8.W), 0.U(8.W)))
 
-	def reg_0_desc: RegFieldDesc = RegFieldDesc(s"FIFO_Ctrl", s"RegDesc", access=RegFieldAccessType.RW, volatile=true)
-	def reg_1_desc: RegFieldDesc = RegFieldDesc(s"ESP_Header", s"RegDesc", access=RegFieldAccessType.R, volatile=true)
-	def reg_2_desc: RegFieldDesc = RegFieldDesc(s"ESP_Data", s"RegDesc", access=RegFieldAccessType.R, volatile=true)
+	// RX Registers
+	wreg_1.read := Cat(Seq(mod.io.recv_address, mod.io.recv_cmd, mod.io.recv_Ident, mod.io.recv_type)) 
+	wreg_2.read := mod.io.recv_Data
+
+	// TX Registers
+	wreg_3.read := Cat(Seq(trans_address, trans_cmd, trans_Ident, trans_type)) 
+	wreg_4.read := trans_Data
+
+	mod.io.deq_Data := deq
+	mod.io.enq_Data := enq
+
+	when(mod.io.deq_Data_new){
+		Data_readed := false.B
+	}
+
+	def reg_0_desc: RegFieldDesc = RegFieldDesc(s"ESP_Ctrl", s"RegDesc", access=RegFieldAccessType.RW, volatile=true)
+	def reg_1_desc: RegFieldDesc = RegFieldDesc(s"ESP_RX_Header", s"RegDesc", access=RegFieldAccessType.R, volatile=true)
+	def reg_2_desc: RegFieldDesc = RegFieldDesc(s"ESP_RX_Data", s"RegDesc", access=RegFieldAccessType.R, volatile=true)
+	def reg_3_desc: RegFieldDesc = RegFieldDesc(s"ESP_TX_Header", s"RegDesc", access=RegFieldAccessType.RW, volatile=false)
+	def reg_4_desc: RegFieldDesc = RegFieldDesc(s"ESP_TX_Data", s"RegDesc", access=RegFieldAccessType.RW, volatile=false)
+
+	def reg_1_field: RegField = RegField(32, 
+											RegReadFn(ready => {Data_readed := true.B; (Bool(true), wreg_1.read)} ), 
+											RegWriteFn((v, d) => wreg_1.writeFn(v, d)), reg_1_desc)
+	def reg_2_field: RegField = RegField(32, 
+											RegReadFn(ready => {Data_readed := true.B; (Bool(true), wreg_2.read)} ), 
+											RegWriteFn((v, d) => wreg_2.writeFn(v, d)), reg_2_desc)
 
 	val regmap_0 = Seq(
 			0 -> Seq(wreg_0.toRegField(Some( reg_0_desc ))),
-			4 -> Seq(wreg_1.toRegField(Some( reg_1_desc ))),
-			8 -> Seq(wreg_2.toRegField(Some( reg_2_desc )))
+			4 -> Seq(reg_1_field),
+			8 -> Seq(reg_2_field),
+			12 -> Seq(wreg_3.toRegField(Some( reg_3_desc ))),
+			16 -> Seq(wreg_4.toRegField(Some( reg_4_desc )))
 		 )
 }
 
