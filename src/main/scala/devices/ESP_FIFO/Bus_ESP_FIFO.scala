@@ -33,9 +33,10 @@ class ESP_FIFOBundle(c:ESP_FIFOParams) extends Bundle{
 }
 
 class TL_ESP_FIFOModule(c:ESP_FIFOParams, outer: TL_ESP_FIFO) extends LazyModuleImp(outer){
+	val params = c
 	val mod = Module(new ESP_FIFO())
-	mod.io.UDPBus <> io.UDPBus
-	mod.io.clkUDP := io.clkUDP
+	mod.io.UDPBus <> outer.port.UDPBus
+	mod.io.clkUDP := outer.port.clkUDP
 
 	val wreg_0 = Wire(new SlaveRegIF(32))
 	val wreg_1 = Wire(new SlaveRegIF(32))
@@ -59,6 +60,11 @@ class TL_ESP_FIFOModule(c:ESP_FIFOParams, outer: TL_ESP_FIFO) extends LazyModule
 	val trans_address = RegEnable(wreg_3.write.bits(31,24), wreg_3.write.valid)
 	val trans_Ident = RegEnable(wreg_3.write.bits(15,8), wreg_3.write.valid)
 	val trans_Data = RegEnable(wreg_4.write.bits, wreg_4.write.valid)
+	mod.io.trans_type := trans_type
+    mod.io.trans_cmd := trans_cmd
+    mod.io.trans_address := trans_address
+    mod.io.trans_Data := trans_Data
+    mod.io.trans_Ident := trans_Ident
 
 	wreg_0.read := Cat(Seq(0.U(5.W), Data_av, Get_new_data, Data_readed, 0.U(6.W), Send, Full, 0.U(8.W), 0.U(8.W)))
 
@@ -84,11 +90,18 @@ class TL_ESP_FIFOModule(c:ESP_FIFOParams, outer: TL_ESP_FIFO) extends LazyModule
 	def reg_4_desc: RegFieldDesc = RegFieldDesc(s"ESP_TX_Data", s"RegDesc", access=RegFieldAccessType.RW, volatile=false)
 
 	def reg_1_field: RegField = RegField(32, 
-											RegReadFn(ready => {Data_readed := true.B; (Bool(true), wreg_1.read)} ), 
-											RegWriteFn((v, d) => wreg_1.writeFn(v, d)), reg_1_desc)
+											RegReadFn(ready => {Data_readed := true.B; (true.B, wreg_1.read)} ), 
+											RegWriteFn((v, d) => 	{ wreg_1.write.valid := v
+																	  wreg_1.write.bits := d
+																	  true.B})
+											
+											/*wreg_1.writeFn(v, d))*/, reg_1_desc)
 	def reg_2_field: RegField = RegField(32, 
-											RegReadFn(ready => {Data_readed := true.B; (Bool(true), wreg_2.read)} ), 
-											RegWriteFn((v, d) => wreg_2.writeFn(v, d)), reg_2_desc)
+											RegReadFn(ready => {Data_readed := true.B; (true.B, wreg_2.read)} ), 
+											RegWriteFn((v, d) =>    { wreg_2.write.valid := v
+																	  wreg_2.write.bits := d
+																	  true.B})
+											/*wreg_2.writeFn(v, d))*/, reg_2_desc)
 
 	val regmap_0 = Seq(
 			0 -> Seq(wreg_0.toRegField(Some( reg_0_desc ))),
@@ -125,7 +138,7 @@ class AXI4_ESP_FIFO(params: ESP_FIFOParams)(implicit p: Parameters)
 trait CanHavePeripheryESP_FIFOList
 { this: BaseSubsystem =>
 
-	val ESP_FIFO = p(ESP_FIFOListKey) match {
+	val esp_fifo = p(ESP_FIFOListKey) match {
 		case Some(params) => {
 		Some(
 			params.map{ ps =>
@@ -138,6 +151,30 @@ trait CanHavePeripheryESP_FIFOList
 
 trait CanHavePeripheryESP_FIFOListModuleImp extends LazyModuleImp {
 	val outer: CanHavePeripheryESP_FIFOList
+
+	val ESP_FIFO_io = outer.esp_fifo match {
+	case Some(esp_fifo) => { 
+		Some(esp_fifo.map{ case (tmod: (Either[BundleBridgeSink[ESP_FIFOBundle], (AXI4_ESP_FIFO, TLToAXI4)]))=>
+			tmod match{
+				/*case Right((mod, toaxi4_reg_0)) =>{
+					val modNode = mod.ioNode.makeSink()
+					val c = modNode.module.params
+					val mIO = modNode.makeIO()
+					//mod.io.clock := clock // Change this to Module Clock
+					toaxi4_reg_0.module.clock := clock
+					//mems_crossing_0.module.clock := mIO.dram_clock
+					mIO
+				}*/
+				case Left(mod) =>{ // TileLink Case
+					val esp_fifo_mIO = mod.makeIO()
+					val c = esp_fifo_mIO.params
+					esp_fifo_mIO
+				}
+				}
+			})
+		}
+		case None => None
+	}
 }
 
 object TL_ESP_FIFO {
