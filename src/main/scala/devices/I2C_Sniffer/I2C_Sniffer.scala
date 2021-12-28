@@ -4,6 +4,7 @@ import chisel3.util._
 import chisel3.experimental._
 import FIFO.{Async_FIFO_new}
 import Checksum.{IP_Checksum_8}
+import device.hssniffer.{Slave_bundle_dram_fifo}
 
 class I2C_Pin extends Bundle{
     val in = Input(Bool())
@@ -189,29 +190,29 @@ class I2C_Decoder extends Module{
     val enq_data = RegInit(false.B)
     io.data_enq.valid := enq_data
     val data_data = RegInit(0.U.asTypeOf(new I2C_Data))
-    io.data_enq.bits.data := data_data
+    io.data_enq.bits := data_data
 
     
     val enq_mgmt = RegInit(false.B)
     io.mgmt_enq.valid := enq_mgmt
     val data_mgmt = RegInit(0.U.asTypeOf(new I2C_MGMT))
-    io.mgmt_enq.bits.data := data_mgmt
+    io.mgmt_enq.bits := data_mgmt
 
-    val s_i2c_idle :: s_wait :: s_addr :: s_rw :: s_ack_address :: s_ack :: s_data :: s_stop :: Nil = Enum(7)
+    val s_i2c_idle :: s_wait :: s_addr :: s_rw :: s_ack_address :: s_ack :: s_data :: s_stop :: Nil = Enum(8)
     val state = RegInit(s_i2c_idle)
 
     val scl_rise = io.i2c_scl && ~RegNext(io.i2c_scl)
     val scl_fall = ~io.i2c_scl && RegNext(io.i2c_scl)
     val sda_rise = io.i2c_sda && ~RegNext(io.i2c_sda)
     val sda_fall = ~io.i2c_sda && RegNext(io.i2c_sda)
-    val start_bit = io.i2c_scl && sda_fall
-    val stop_bit = io.i2c_scl && sda_rise
+    val start_bit = io.i2c_scl && sda_fall && ~scl_rise && ~scl_fall
+    val stop_bit = io.i2c_scl && sda_rise && ~scl_rise && ~scl_fall
 
     val mChecksum = Module(new IP_Checksum_8(18))
     val rst_checksum = RegInit(false.B)
     val update_checksum = RegInit(false.B)
     val data_checksum = RegInit(0.U(8.W))
-    mChecksum.io.data_in := data_data
+    mChecksum.io.data_in := data_data.data
     mChecksum.io.preload := 0.U
     mChecksum.io.update := update_checksum
     mChecksum.io.rst := rst_checksum
@@ -219,7 +220,7 @@ class I2C_Decoder extends Module{
 
     val length = RegInit(0.U(10.W))
     val counter = RegInit(0.U(4.W))
-    val busy = true.B
+    val busy = RegInit(false.B)
 
     switch(state){
         is(s_i2c_idle){
@@ -248,7 +249,7 @@ class I2C_Decoder extends Module{
             when(scl_fall){
                 busy := true.B
                 state := s_addr
-                data_data := 0.U
+                data_data := 0.U.asTypeOf(data_data)
                 rst_checksum := false.B
             }
         }
@@ -271,7 +272,7 @@ class I2C_Decoder extends Module{
         is(s_data){
             
             when(~io.i2c_scl && counter === 0.U){  // Data is in FIFO
-                data_data := 0.U
+                data_data := 0.U.asTypeOf(data_data)
                 enq_data := false.B
             }
             when(io.i2c_scl){
@@ -337,107 +338,114 @@ class I2C_Decoder extends Module{
 class I2C_Fifo(DRAM_Width : Int) extends Module{
     val io = IO(new Bundle{
         val mem_clock = Input(Clock())
-        val i2c_clock = Input(Clock())
-
+        
         val mgmt_enq = Flipped(DecoupledIO(new I2C_MGMT))
         val data_enq = Flipped(DecoupledIO(new I2C_Data))
 
-        val arbit_fifo = Output(Bool())
-        val dram_fifo = DecoupledIO(UInt(DRAM_Width.W))
+        val dram_fifo = new Slave_bundle_dram_fifo(DRAM_Width)
+       // val arbit_fifo = Output(Bool())
+       // val dram_fifo = DecoupledIO(UInt(DRAM_Width.W))
     })
 
-    val arbit_fifo = RegInit(false.B)
-    io.arbit_fifo := arbit_fifo
-    val enq_dram = RegInit(false.B)
-    io.dram_fifo.valid := enq_dram
-    val dram_data = RegInit(0.U(128.W))
-    io.dram_fifo.bits := dram_data
-
-    /*
-        val queue = new QueueIO(gen, pow(2, AddrWidth).toInt)
-            val enq = Flipped(DequeueIO)
-            val deq = DequeueIO
-        val clkA = Input(Clock())
-        val clkB = Input(Clock())
-        val empty = Output(Bool())
-        val full = Output(Bool())
-    */
     val data_fifo = Module(new Async_FIFO_new(new I2C_Data, 10)) // 256 Entries
+    data_fifo.io.clkA := clock
+    data_fifo.io.clkB := io.mem_clock
+    data_fifo.io.queue.enq <> io.data_enq
     val mgmt_fifo = Module(new Async_FIFO_new(new I2C_MGMT, 6)) // 64 Entries
+    mgmt_fifo.io.clkA := clock
+    mgmt_fifo.io.clkB := io.mem_clock
+    mgmt_fifo.io.queue.enq <> io.mgmt_enq
 
-    val deq_data = RegInit(false.B)
-    data_fifo.io.queue.deq.ready := deq_data
-    val deq_mgmt = RegInit(false.B)
-    mgmt_fifo.io.queue.deq.ready := deq_mgmt
 
-    val temp = RegInit(0.U(4.W))
+    withClock(io.mem_clock){
+        val arbit_fifo = RegInit(false.B)
+        io.dram_fifo.arbit_fifo := arbit_fifo
+        val enq_dram = RegInit(false.B)
+        io.dram_fifo.slave_fifo.valid := enq_dram
+        val dram_data = RegInit(0.U(128.W))
+        io.dram_fifo.slave_fifo.bits := dram_data
 
-    val cDataType = "h14".U
+        val deq_data = RegInit(false.B)
+        data_fifo.io.queue.deq.ready := deq_data
+        val deq_mgmt = RegInit(false.B)
+        mgmt_fifo.io.queue.deq.ready := deq_mgmt
 
-    if(DRAM_Width == 128){    
-        val s_idle :: s_header :: s_timestamp :: s_wait :: s_data :: s_stop :: Nil = Enum(6)
-        val state = RegInit(s_idle)
-        state.suggestName("State_DRAM_FIFO")
+        val temp = RegInit(0.U(8.W))
+        temp.suggestName("temp")
 
-        switch(state){
-            is(s_idle){
-                when(mgmt_fifo.io.queue.deq.ready){
-                    arbit_fifo := true.B
-                    when(io.dram_fifo.ready){
-                        state := s_header
-                        deq_mgmt := true.B
-                    }
-                }
-            }
-            is(s_header){
-                deq_mgmt := false.B
-                when(mgmt_fifo.io.queue.deq.valid){
-                    state := s_timestamp
-                    dram_data := cDataType | (mgmt_fifo.io.queue.deq.bits.length << 8) | (mgmt_fifo.io.queue.deq.bits.flags.asUInt() << 32) | (mgmt_fifo.io.queue.deq.bits.checksum << 64)
-                    enq_dram := true.B
-                }
-            }
-            is(s_timestamp){
-                when(io.dram_fifo.ready){
-                    state := s_timestamp
-                    dram_data := 0.U    // 2x 64bit
-                }
-            }
-            is(s_wait){
-                when(io.dram_fifo.ready){
-                    enq_dram := false.B
-                    state := s_data
-                    temp := 0.U
-                }
-            }
-            is(s_data){
-                when(io.dram_fifo.ready){
-                    when(temp === mgmt_fifo.io.queue.deq.bits.length + 1.U){
-                        state := s_stop
-                        enq_dram := true.B
-                    }.otherwise { 
-                        when((temp % ((DRAM_Width/8).U)) === 0.U){
-                            enq_dram := true.B
+        val cDataType = "h14".U
+
+        if(DRAM_Width == 128){    
+            val s_idle :: s_header :: s_timestamp :: s_wait :: s_data :: s_stop :: Nil = Enum(6)
+            val state = RegInit(s_idle)
+            state.suggestName("State_DRAM_FIFO")
+
+            switch(state){
+                is(s_idle){
+                    arbit_fifo := false.B
+                    when(~mgmt_fifo.io.empty){
+                        arbit_fifo := true.B
+                        when(io.dram_fifo.slave_fifo.ready){
+                            state := s_header
+                            deq_mgmt := true.B
                         }
-                        deq_data := true.B
-                    } 
-
-                }.otherwise { 
-                    deq_data := false.B
-                }
-                when(data_fifo.io.queue.deq.valid){
-                    when((temp % ((DRAM_Width/8).U)) === 0.U){
-                        dram_data := data_fifo.io.queue.deq.bits
-                    }.otherwise { 
-                        dram_data := dram_data | (data_fifo.io.queue.deq.bits.asUInt << ((temp%((DRAM_Width/8).U))*8.U))
                     }
-                    temp := temp + 1.U
                 }
-            }
-            is(s_stop){
-                when(io.dram_fifo.ready){
-                    enq_dram := false.B
-                    state := s_idle
+                is(s_header){
+                    deq_mgmt := false.B
+                    when(mgmt_fifo.io.queue.deq.valid){
+                        state := s_timestamp
+                        dram_data := cDataType | (mgmt_fifo.io.queue.deq.bits.length << 8) | (mgmt_fifo.io.queue.deq.bits.flags.asUInt() << 32) | (mgmt_fifo.io.queue.deq.bits.checksum << 64)
+                        enq_dram := true.B
+                    }
+                }
+                is(s_timestamp){
+                    when(io.dram_fifo.slave_fifo.ready){
+                        state := s_wait
+                        dram_data := 0.U    // 2x 64bit
+                    }
+                }
+                is(s_wait){ 
+                    when(io.dram_fifo.slave_fifo.ready){
+                        enq_dram := false.B
+                        state := s_data
+                        temp := 0.U
+                    }
+                }
+                is(s_data){
+                    when(io.dram_fifo.slave_fifo.ready){
+                        when(temp === mgmt_fifo.io.queue.deq.bits.length ){
+                            state := s_stop
+                            enq_dram := true.B
+                            deq_data := false.B
+                        }.otherwise{
+                            when( ((temp % ((DRAM_Width/8).U)) === 0.U) && temp > 0.U){
+                                enq_dram := true.B
+                            }.otherwise { 
+                                enq_dram := false.B
+                            }
+                            deq_data := true.B
+                        }
+                        when((temp+2.U) >= mgmt_fifo.io.queue.deq.bits.length){
+                            deq_data := false.B
+                        }
+                    }.otherwise { 
+                        deq_data := false.B
+                    }
+                    when(data_fifo.io.queue.deq.valid){
+                        when((temp % ((DRAM_Width/8).U)) === 0.U){
+                            dram_data := data_fifo.io.queue.deq.bits.data
+                        }.otherwise { 
+                            dram_data := dram_data.data | (data_fifo.io.queue.deq.bits.asUInt << ((temp%((DRAM_Width/8).U))*8.U))
+                        }
+                        temp := temp + 1.U
+                    }
+                }
+                is(s_stop){
+                    when(io.dram_fifo.slave_fifo.ready){
+                        enq_dram := false.B
+                        state := s_idle
+                    }
                 }
             }
         }
