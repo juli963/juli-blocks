@@ -175,8 +175,8 @@ abstract class TLETHCtrlBase( c: ETHCtrlParams, beatBytes:Int)(implicit p: Param
 class TLETHCtrl(c: ETHCtrlParams, w: Int)(implicit p: Parameters)
     extends TLETHCtrlBase(c,w)(p)
     with HasTLControlRegMap {
+      
   lazy val module = new ETHCtrlModule(c, this) {
-
     regmap(regmap_val :_*)
   }
 }

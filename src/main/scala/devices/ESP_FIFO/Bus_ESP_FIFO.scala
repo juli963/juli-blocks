@@ -51,7 +51,7 @@ class TL_ESP_FIFOModule(c:ESP_FIFOParams, outer: TL_ESP_FIFO) extends LazyModule
 	val Data_readed = RegInit(false.B)
 
 	val Send = RegEnable(wreg_0.write.bits(17), wreg_0.write.valid)
-	val Send_ff = RegNext(Get_new_data)
+	val Send_ff = RegNext(Send)
 	val enq = Send && ~Send_ff
 	val Full = mod.io.enq_full
 
