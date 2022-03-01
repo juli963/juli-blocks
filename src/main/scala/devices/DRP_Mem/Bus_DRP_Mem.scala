@@ -90,7 +90,10 @@ class TL_DRP_MemModule(c:DRP_MemParams, outer: TL_DRP_Mem) extends LazyModuleImp
     val DO = Output(UInt(16.W))
 */
 
+	val data_mask = RegInit(0.U(4.W))
+	val data_old = RegInit(0.U(16.W))
 	drp_wr_data := mems_f_0.a.bits.data
+	//mems_f_0.a.bits.mask -> Data Mask
 
 	val ( s_idle :: s_read0 :: s_read1 :: s_read2 :: s_write :: s_finish  :: Nil) = Enum(6)
 	val state = RegInit(s_idle)
@@ -102,34 +105,53 @@ class TL_DRP_MemModule(c:DRP_MemParams, outer: TL_DRP_Mem) extends LazyModuleImp
 			when(mems_f_0.a.fire()){
 				when(mems_f_0.a.bits.opcode === 0.U){
 					mems_0_a_ready := false.B
-					drp_wr_data := mems_f_0.a.bits.data
+					drp_wr_data := Mux(mems_f_0.a.bits.mask(1,0).orR, mems_f_0.a.bits.data(15,0), mems_f_0.a.bits.data(31,16))
 
 					drp_en := true.B
 					drp_we := true.B
+					transfer_size := mems_f_0.a.bits.size
+					data_mask := mems_f_0.a.bits.mask
 
 					state := s_write
 				}.elsewhen(mems_f_0.a.bits.opcode === 1.U){
 					mems_0_a_ready := false.B
-					drp_wr_data := mems_f_0.a.bits.data
+					drp_wr_data := Mux(mems_f_0.a.bits.mask(1,0).orR, mems_f_0.a.bits.data(15,0), mems_f_0.a.bits.data(31,16))
 
 					drp_en := true.B
 					drp_we := true.B
+					transfer_size := mems_f_0.a.bits.size
+					data_mask := mems_f_0.a.bits.mask
+					
 
 					state := s_write
 				}.elsewhen(mems_f_0.a.bits.opcode === 4.U){
 					mems_0_a_ready := false.B
-					state := s_read0
 
 					drp_en := true.B
 					drp_we := false.B
 					transfer_size := mems_f_0.a.bits.size
 
-					state := s_read0
-				}
+					when( mems_f_0.a.bits.mask(1,0).orR ){
+						state := s_read1
+					}.otherwise{
+						state := s_read0
+					}
 
-				drp_address := (mems_f_0.a.bits.address - c.mem_slave_0_address.U)(c.drp_width-1,0)
+					
+				}
+				
+				//drp_address := (mems_f_0.a.bits.address - c.mem_slave_0_address.U)(c.drp_width-1,0)
+				drp_address := Mux(mems_f_0.a.bits.mask(1,0).orR, (mems_f_0.a.bits.address - c.mem_slave_0_address.U)(c.drp_width-1,0),  (mems_f_0.a.bits.address - c.mem_slave_0_address.U)(c.drp_width-1,0) + 1.U)
 			}.otherwise{
 				mems_0_a_ready := true.B
+			}
+		}
+		is(s_read1){
+			drp_en := false.B
+			when( outer.port.RDY ){
+				drp_en := true.B
+				transfer_size := transfer_size - 1.U
+				data_old := outer.port.DO
 			}
 		}
 		is(s_read0){    // Wait States for Data to get Ready
@@ -141,12 +163,13 @@ class TL_DRP_MemModule(c:DRP_MemParams, outer: TL_DRP_Mem) extends LazyModuleImp
 			}
 			when(outer.port.RDY && transfer_size.orR()){
 				mems_0_d_valid := true.B
-				mems_0_d_channel := outer.mems_node_0.edges.in.head.AccessAck(mems_0_a_channel, outer.port.DO) //AccessAckData
+				mems_0_d_channel := outer.mems_node_0.edges.in.head.AccessAck(mems_0_a_channel, (outer.port.DO << 16) | data_old ) //AccessAckData
 			}
 			when(mems_f_0.d.fire()){
 				mems_0_d_valid := false.B
 				when(transfer_size.orR()){
 					transfer_size := transfer_size - 1.U
+					state := s_read1
 					drp_en := true.B
 					drp_address := drp_address + 1.U
 				}
@@ -178,10 +201,12 @@ abstract class TL_DRP_MemBase( c: DRP_MemParams)(implicit p: Parameters)
 	extends LazyModule with HasClockDomainCrossing 
 {
 	//require(isPow2(c.mem_slave_0_sizeBytes), "Memory Slave_0 Size is not Power of 2")
+	val new_width = if(c.drp_width < 8) 8 else c.drp_width
+
 	require((c.mem_slave_0_address % 8) == 0, "Memory Slave_0 Address is not Aligned")
 	val mems_node_0 = TLManagerNode(Seq(TLManagerPortParameters(
 		managers = Seq(TLManagerParameters(  //BigDecimal.valueOf(doubleValue).toBigInteger();
-			address	= Seq(AddressSet(c.mem_slave_0_address, BigInt((math.ceil(scala.math.pow(2, c.drp_width))).longValue()-1) )),
+			address	= Seq(AddressSet(c.mem_slave_0_address, BigInt(2*(math.ceil(scala.math.pow(2, new_width))).longValue()-1) )),
 			resources	= new SimpleDevice("DRP_Mem", Seq("juli-blocks")).reg("mem"),
 			regionType	= RegionType.UNCACHED,
 			supportsGet = TransferSizes(1, 4),  // Transfer Size in Bytes(min, max) 

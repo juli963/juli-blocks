@@ -67,8 +67,13 @@ class ESP_FIFO() extends Module{
     io.recv_Data := rx_fifo.io.queue.deq.bits.Data
     io.recv_Ident := rx_fifo.io.queue.deq.bits.Ident
 
+	val wReset = Wire(Bool())
+	withClock(io.clkUDP){
+		val reg_reset = RegNext(RegNext(RegNext(reset)))
+        wReset := reg_reset
+	}
 
-    withClock(io.clkUDP){
+    withClockAndReset(io.clkUDP, wReset){
         // Transmitter 
         val s_tx_idle :: s_tx_check :: s_tx_checksum :: s_tx_send :: s_wait :: Nil = Enum(5)
 
