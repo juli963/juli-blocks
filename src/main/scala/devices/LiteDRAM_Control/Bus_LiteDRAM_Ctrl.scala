@@ -63,7 +63,7 @@ class TL_LiteDRAM_CtrlModule(c:LiteDRAM_CtrlParams, outer: TL_LiteDRAM_Ctrl) ext
 abstract class TL_LiteDRAM_CtrlBase( c: LiteDRAM_CtrlParams)(implicit p: Parameters) 
 	extends LazyModule //with HasClockDomainCrossing 
 {
-	require(isPow2(c.mem_slave_0_sizeBytes+1), "Memory Slave_0 Size is not Power of 2")
+	require(isPow2(c.mem_slave_0_sizeBytes+1), "Memory Slave_0 Size +1 is not Power of 2")
 	require((c.mem_slave_0_address % 8) == 0, "Memory Slave_0 Address is not Aligned")
 	val mems_node_0 = TLManagerNode(Seq(TLManagerPortParameters(
 		managers = Seq(TLManagerParameters(

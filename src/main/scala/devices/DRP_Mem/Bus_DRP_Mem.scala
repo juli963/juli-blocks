@@ -74,17 +74,17 @@ class TL_DRP_MemModule(c:DRP_MemParams, outer: TL_DRP_Mem) extends LazyModuleImp
 
 	val drp_we = RegInit(false.B)
 	outer.port.WE := drp_we
-	val drp_wr_data = RegInit(0.U(30.W))
+	val drp_wr_data = RegInit(0.U(16.W))
 	outer.port.DI := drp_wr_data
-	val drp_address = RegInit(0.U(30.W))
+	val drp_address = RegInit(0.U(c.drp_width.W))
 	outer.port.ADDR := drp_address
 	val drp_en = RegInit(false.B)
 	outer.port.EN := drp_en
 
 	outer.port.CLK := clock
 
-
-	val transfer_size = RegInit(0.U(mems_n_0.bundle.sizeBits.W))
+ 
+	val transfer_size = RegInit(0.U((log2Ceil( 1<<(1<<mems_n_0.bundle.sizeBits))).W))
 /* DRP
     val RDY = Output(Bool())
     val DO = Output(UInt(16.W))
@@ -109,7 +109,6 @@ class TL_DRP_MemModule(c:DRP_MemParams, outer: TL_DRP_Mem) extends LazyModuleImp
 
 					drp_en := true.B
 					drp_we := true.B
-					transfer_size := mems_f_0.a.bits.size
 					data_mask := mems_f_0.a.bits.mask
 
 					state := s_write
@@ -119,17 +118,15 @@ class TL_DRP_MemModule(c:DRP_MemParams, outer: TL_DRP_Mem) extends LazyModuleImp
 
 					drp_en := true.B
 					drp_we := true.B
-					transfer_size := mems_f_0.a.bits.size
 					data_mask := mems_f_0.a.bits.mask
 					
 
 					state := s_write
 				}.elsewhen(mems_f_0.a.bits.opcode === 4.U){
 					mems_0_a_ready := false.B
-
 					drp_en := true.B
 					drp_we := false.B
-					transfer_size := mems_f_0.a.bits.size
+					
 
 					when( mems_f_0.a.bits.mask(1,0).orR ){
 						state := s_read1
@@ -139,9 +136,9 @@ class TL_DRP_MemModule(c:DRP_MemParams, outer: TL_DRP_Mem) extends LazyModuleImp
 
 					
 				}
-				
-				//drp_address := (mems_f_0.a.bits.address - c.mem_slave_0_address.U)(c.drp_width-1,0)
-				drp_address := Mux(mems_f_0.a.bits.mask(1,0).orR, (mems_f_0.a.bits.address - c.mem_slave_0_address.U)(c.drp_width-1,0),  (mems_f_0.a.bits.address - c.mem_slave_0_address.U)(c.drp_width-1,0) + 1.U)
+				transfer_size := (1.U<<mems_f_0.a.bits.size)
+				drp_address := (mems_f_0.a.bits.address)(c.drp_width,1)
+				//drp_address := Mux(mems_f_0.a.bits.mask(1,0).orR, (mems_f_0.a.bits.address)(c.drp_width,1),  ((mems_f_0.a.bits.address)(c.drp_width,1)) + 1.U)
 			}.otherwise{
 				mems_0_a_ready := true.B
 			}
@@ -149,28 +146,43 @@ class TL_DRP_MemModule(c:DRP_MemParams, outer: TL_DRP_Mem) extends LazyModuleImp
 		is(s_read1){
 			drp_en := false.B
 			when( outer.port.RDY ){
+				
+				state := s_read0
 				drp_en := true.B
-				transfer_size := transfer_size - 1.U
+				/*when(transfer_size < 2.U){
+					transfer_size := 0.U
+				}.otherwise{
+					
+					transfer_size := transfer_size - 2.U
+				}*/
+				
+				drp_address := drp_address + 1.U
 				data_old := outer.port.DO
 			}
 		}
 		is(s_read0){    // Wait States for Data to get Ready
 			drp_en := false.B
 
-			when(~transfer_size.orR() && outer.port.RDY){	// Transfer Size = 0
+			when(~transfer_size.orR()){	// Transfer Size = 0
 				state := s_idle
 				mems_0_a_ready := true.B
 			}
-			when(outer.port.RDY && transfer_size.orR()){
+			when(outer.port.RDY){
 				mems_0_d_valid := true.B
-				mems_0_d_channel := outer.mems_node_0.edges.in.head.AccessAck(mems_0_a_channel, (outer.port.DO << 16) | data_old ) //AccessAckData
+				mems_0_d_channel := outer.mems_node_0.edges.in.head.AccessAck(mems_0_a_channel, ((outer.port.DO << 16) | data_old) ) //AccessAckData
 			}
 			when(mems_f_0.d.fire()){
 				mems_0_d_valid := false.B
 				when(transfer_size.orR()){
-					transfer_size := transfer_size - 1.U
-					state := s_read1
-					drp_en := true.B
+					when(transfer_size < 4.U){
+						transfer_size := 0.U
+					}.otherwise{
+						transfer_size := transfer_size - 4.U
+						state := s_read1
+						drp_en := true.B
+					}
+					
+					
 					drp_address := drp_address + 1.U
 				}
 			}
